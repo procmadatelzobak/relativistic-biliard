@@ -522,8 +522,8 @@ sliderC.addEventListener("input", () => {
 btnReset.addEventListener("click", () => { initBalls(); });
 
 // ── Drawing helpers ───────────────────────────────────────
-const GRID_WARP_STRENGTH   = 800;  // how strongly balls pull grid points
-const GRID_WARP_SMOOTHING  = 400;  // softening factor to avoid singularity at dist=0
+const GRID_WARP_STRENGTH   = 150000;  // how strongly balls pull grid points
+const GRID_WARP_SMOOTHING  = 5000;  // softening factor to avoid singularity at dist=0
 
 function gridWarp(x, y, activeBalls) {
   let ox = 0, oy = 0;
@@ -541,7 +541,7 @@ function gridWarp(x, y, activeBalls) {
 function drawGrid() {
   if (!chkGrid.checked) return;
   const SPACING = 40;
-  const activeBalls = balls.filter(b => b.active && b.speed() > MIN_SPEED);
+  const activeBalls = balls.filter(b => b.active);
   ctx.strokeStyle = "rgba(100,255,120,0.12)";
   ctx.lineWidth = 0.5;
 
