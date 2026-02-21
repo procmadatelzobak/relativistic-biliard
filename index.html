@@ -1,0 +1,719 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Relativistic Billiards</title>
+<style>
+/* ── Reset & Layout ─────────────────────────────────────── */
+* { margin: 0; padding: 0; box-sizing: border-box; }
+body {
+  background: #1a1a2e;
+  color: #eee;
+  font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  min-height: 100vh;
+  overflow: hidden;
+}
+h1 {
+  margin: 10px 0 4px;
+  font-size: 1.4rem;
+  letter-spacing: 2px;
+  color: #e0c097;
+}
+#ui-bar {
+  display: flex;
+  gap: 18px;
+  align-items: center;
+  margin-bottom: 6px;
+  font-size: 0.82rem;
+}
+#ui-bar label { color: #aaa; }
+#ui-bar .val { color: #f0d080; font-weight: bold; }
+canvas {
+  border: 3px solid #3a3a5c;
+  border-radius: 8px;
+  cursor: crosshair;
+  display: block;
+}
+#hud {
+  margin-top: 6px;
+  font-size: 0.78rem;
+  color: #888;
+  text-align: center;
+  max-width: 820px;
+  line-height: 1.5;
+}
+#hud .key { color: #e0c097; }
+#info-panel {
+  margin-top: 4px;
+  font-size: 0.75rem;
+  color: #666;
+  text-align: center;
+}
+button {
+  background: #3a3a5c;
+  color: #eee;
+  border: 1px solid #555;
+  padding: 4px 12px;
+  border-radius: 4px;
+  cursor: pointer;
+  font-size: 0.8rem;
+}
+button:hover { background: #50507a; }
+</style>
+</head>
+<body>
+<h1>&#9733; Relativistic Billiards &#9733;</h1>
+<div id="ui-bar">
+  <label>c (speed of light):
+    <input type="range" id="slider-c" min="60" max="800" value="200">
+    <span class="val" id="val-c">200</span> px/s
+  </label>
+  <button id="btn-reset">Reset Table</button>
+  <label>Show contraction: <input type="checkbox" id="chk-contraction" checked></label>
+  <label>Doppler color: <input type="checkbox" id="chk-doppler" checked></label>
+</div>
+<canvas id="game"></canvas>
+<div id="hud">
+  <span class="key">Click &amp; drag</span> the cue ball to aim &amp; set power &middot;
+  <span class="key">Release</span> to shoot &middot;
+  <span class="key">Scroll</span> over slider to change <em>c</em> &middot;
+  Balls obey <span class="key">Special Relativity</span>: length contraction, relativistic momentum &amp; collisions
+</div>
+<div id="info-panel" id="info-panel"></div>
+
+<script>
+/* ================================================================
+   RELATIVISTIC BILLIARDS – single-file prototype
+   No external libraries. Pure Canvas + Vanilla JS.
+   All ball dynamics use Special Relativity:
+     • γ = 1/√(1 − v²/c²)
+     • Relativistic momentum p = γ m v
+     • Relativistic kinetic energy K = (γ−1) m c²
+     • 1-D relativistic velocity addition for collisions
+     • Visual length contraction & simplified Doppler hue shift
+   ================================================================ */
+
+"use strict";
+
+// ── DOM refs ──────────────────────────────────────────────
+const canvas  = document.getElementById("game");
+const ctx     = canvas.getContext("2d");
+const sliderC = document.getElementById("slider-c");
+const valC    = document.getElementById("val-c");
+const btnReset      = document.getElementById("btn-reset");
+const chkContraction = document.getElementById("chk-contraction");
+const chkDoppler     = document.getElementById("chk-doppler");
+const infoPanel      = document.getElementById("info-panel");
+
+// ── Constants & Config ────────────────────────────────────
+const TABLE_W = 800;
+const TABLE_H = 400;
+const CUSHION  = 28;           // border cushion thickness
+const POCKET_R = 18;           // pocket radius
+const BALL_R   = 11;           // rest-frame ball radius
+const FRICTION = 0.35;         // deceleration (px/s²)
+const RESTITUTION = 0.96;      // coefficient of restitution for walls
+const MIN_SPEED = 1;           // below this, ball stops
+
+canvas.width  = TABLE_W;
+canvas.height = TABLE_H;
+
+let C = 200;  // speed of light in px/s (tuneable)
+
+// ── Vector helpers ────────────────────────────────────────
+const Vec = {
+  add(a, b)    { return { x: a.x + b.x, y: a.y + b.y }; },
+  sub(a, b)    { return { x: a.x - b.x, y: a.y - b.y }; },
+  scale(v, s)  { return { x: v.x * s, y: v.y * s }; },
+  dot(a, b)    { return a.x * b.x + a.y * b.y; },
+  len(v)       { return Math.sqrt(v.x * v.x + v.y * v.y); },
+  norm(v)      { const l = Vec.len(v); return l > 0 ? { x: v.x / l, y: v.y / l } : { x: 0, y: 0 }; },
+  rot(v, a)    { const c = Math.cos(a), s = Math.sin(a); return { x: v.x * c - v.y * s, y: v.x * s + v.y * c }; },
+};
+
+// ── Relativity helpers ────────────────────────────────────
+function gamma(speed) {
+  const beta2 = (speed * speed) / (C * C);
+  if (beta2 >= 1) return 1e6;         // cap for safety
+  return 1 / Math.sqrt(1 - beta2);
+}
+
+/** Clamp speed strictly below c */
+function clampSpeed(speed) {
+  return Math.min(speed, C * 0.9999);
+}
+
+/**
+ * Relativistic 1-D velocity addition:
+ *   u' = (u + v) / (1 + u*v / c²)
+ * Used after boosting into the CoM frame.
+ */
+function relVelAdd(u, v) {
+  return (u + v) / (1 + (u * v) / (C * C));
+}
+
+// ── Ball class ────────────────────────────────────────────
+class Ball {
+  constructor(x, y, color, number, mass) {
+    this.x = x;
+    this.y = y;
+    this.vx = 0;
+    this.vy = 0;
+    this.r  = BALL_R;
+    this.color = color;
+    this.baseHue = 0;          // computed from color for Doppler
+    this.number = number;      // 0 = cue ball
+    this.mass = mass || 1;
+    this.active = true;        // false when pocketed
+    this._parseHue();
+  }
+
+  _parseHue() {
+    // extract approximate hue for Doppler shift
+    const tmp = document.createElement("canvas").getContext("2d");
+    tmp.fillStyle = this.color;
+    const hex = tmp.fillStyle;  // normalised to #rrggbb
+    const r = parseInt(hex.slice(1, 3), 16) / 255;
+    const g = parseInt(hex.slice(3, 5), 16) / 255;
+    const b = parseInt(hex.slice(5, 7), 16) / 255;
+    const max = Math.max(r, g, b), min = Math.min(r, g, b);
+    let h = 0;
+    if (max !== min) {
+      const d = max - min;
+      if (max === r) h = ((g - b) / d + 6) % 6;
+      else if (max === g) h = (b - r) / d + 2;
+      else h = (r - g) / d + 4;
+      h *= 60;
+    }
+    this.baseHue = h;
+    this.baseSat = (max === 0) ? 0 : ((max - min) / max) * 100;
+    this.baseVal = max * 100;
+  }
+
+  speed() { return Vec.len({ x: this.vx, y: this.vy }); }
+
+  /** Relativistic momentum magnitude */
+  momentum() {
+    const s = this.speed();
+    return gamma(s) * this.mass * s;
+  }
+
+  /** Relativistic kinetic energy */
+  kineticEnergy() {
+    return (gamma(this.speed()) - 1) * this.mass * C * C;
+  }
+
+  /** Apparent color after simplified Doppler shift */
+  dopplerColor(observerAngle) {
+    if (!chkDoppler.checked || this.number === 0) return this.color;
+    const beta = this.speed() / C;
+    // simplified: shift hue toward blue when approaching, red when receding
+    const shift = beta * 120;  // degrees
+    const movingAngle = Math.atan2(this.vy, this.vx);
+    const rel = Math.cos(movingAngle - observerAngle); // +1 = approaching
+    const hue = (this.baseHue - shift * rel + 360) % 360;
+    return "hsl(" + hue + "," + Math.round(this.baseSat) + "%," + Math.round(this.baseVal * 0.7) + "%)";
+  }
+
+  update(dt) {
+    if (!this.active) return;
+    let speed = this.speed();
+    if (speed < MIN_SPEED) { this.vx = 0; this.vy = 0; return; }
+
+    // Apply friction (deceleration)
+    const dir = Vec.norm({ x: this.vx, y: this.vy });
+    let newSpeed = speed - FRICTION * dt * (1 + speed / C);  // slightly higher friction at high v
+    if (newSpeed < 0) newSpeed = 0;
+    newSpeed = clampSpeed(newSpeed);
+
+    this.vx = dir.x * newSpeed;
+    this.vy = dir.y * newSpeed;
+
+    // Move
+    this.x += this.vx * dt;
+    this.y += this.vy * dt;
+  }
+}
+
+// ── Pocket positions ──────────────────────────────────────
+const POCKETS = [
+  { x: CUSHION,             y: CUSHION },
+  { x: TABLE_W / 2,         y: CUSHION - 4 },
+  { x: TABLE_W - CUSHION,   y: CUSHION },
+  { x: CUSHION,             y: TABLE_H - CUSHION },
+  { x: TABLE_W / 2,         y: TABLE_H - CUSHION + 4 },
+  { x: TABLE_W - CUSHION,   y: TABLE_H - CUSHION },
+];
+
+// ── Ball colors & layout ─────────────────────────────────
+const BALL_COLORS = [
+  "#ffffff",  // 0 cue
+  "#f5d442",  // 1 yellow
+  "#2255cc",  // 2 blue
+  "#cc2222",  // 3 red
+  "#6622aa",  // 4 purple
+  "#ee7722",  // 5 orange
+  "#228833",  // 6 green
+  "#882222",  // 7 maroon
+  "#111111",  // 8 black
+  "#f5d442",  // 9 yellow stripe
+  "#2255cc",  // 10 blue stripe
+  "#cc2222",  // 11 red stripe
+  "#6622aa",  // 12 purple stripe
+  "#ee7722",  // 13 orange stripe
+  "#228833",  // 14 green stripe
+  "#882222",  // 15 maroon stripe
+];
+
+let balls = [];
+let pocketed = [];
+
+function rackPosition(row, col) {
+  const startX = TABLE_W * 0.68;
+  const startY = TABLE_H / 2;
+  const gap = BALL_R * 2.15;
+  return {
+    x: startX + row * gap * Math.cos(Math.PI / 6),
+    y: startY + col * gap + row * gap * Math.sin(Math.PI / 6) - row * gap * 0.5,
+  };
+}
+
+function initBalls() {
+  balls = [];
+  pocketed = [];
+
+  // Cue ball
+  balls.push(new Ball(TABLE_W * 0.25, TABLE_H / 2, BALL_COLORS[0], 0, 1));
+
+  // Rack (triangle)
+  const rackOrder = [1, 2, 3, 8, 4, 5, 6, 7, 9, 10, 11, 12, 13, 14, 15];
+  let idx = 0;
+  for (let row = 0; row < 5; row++) {
+    for (let col = 0; col <= row; col++) {
+      if (idx >= rackOrder.length) break;
+      const num = rackOrder[idx++];
+      const pos = rackPosition(row, col);
+      balls.push(new Ball(pos.x, pos.y, BALL_COLORS[num], num, 1));
+    }
+  }
+}
+
+// ── Collision: ball ↔ wall ────────────────────────────────
+function wallCollisions(ball) {
+  const left   = CUSHION + ball.r;
+  const right  = TABLE_W - CUSHION - ball.r;
+  const top    = CUSHION + ball.r;
+  const bottom = TABLE_H - CUSHION - ball.r;
+
+  if (ball.x < left)   { ball.x = left;   ball.vx = Math.abs(ball.vx) * RESTITUTION; }
+  if (ball.x > right)  { ball.x = right;  ball.vx = -Math.abs(ball.vx) * RESTITUTION; }
+  if (ball.y < top)    { ball.y = top;    ball.vy = Math.abs(ball.vy) * RESTITUTION; }
+  if (ball.y > bottom) { ball.y = bottom; ball.vy = -Math.abs(ball.vy) * RESTITUTION; }
+}
+
+// ── Collision: ball ↔ ball (relativistic) ─────────────────
+/**
+ * Relativistic elastic collision between two balls.
+ * We boost into the centre-of-momentum frame along the
+ * collision axis, reverse the velocities along that axis
+ * (elastic), then boost back.
+ */
+function resolveCollision(a, b) {
+  const dx = b.x - a.x;
+  const dy = b.y - a.y;
+  const dist = Math.sqrt(dx * dx + dy * dy);
+  const minDist = a.r + b.r;
+  if (dist > minDist || dist === 0) return;
+
+  // Unit normal & tangent
+  const nx = dx / dist;
+  const ny = dy / dist;
+
+  // Separate overlapping balls
+  const overlap = minDist - dist;
+  a.x -= nx * overlap * 0.5;
+  a.y -= ny * overlap * 0.5;
+  b.x += nx * overlap * 0.5;
+  b.y += ny * overlap * 0.5;
+
+  // Project velocities onto collision normal
+  const va_n = a.vx * nx + a.vy * ny;
+  const vb_n = b.vx * nx + b.vy * ny;
+
+  // Tangential components (unchanged)
+  const va_tx = a.vx - va_n * nx;
+  const va_ty = a.vy - va_n * ny;
+  const vb_tx = b.vx - vb_n * nx;
+  const vb_ty = b.vy - vb_n * ny;
+
+  // Only resolve if approaching
+  if (va_n - vb_n <= 0) return;
+
+  // ── Relativistic 1-D collision along normal ──
+  const ma = a.mass;
+  const mb = b.mass;
+  const ga = gamma(Math.abs(va_n));
+  const gb = gamma(Math.abs(vb_n));
+
+  // Centre-of-momentum velocity (relativistic)
+  // V_cm = (γ_a m_a v_a + γ_b m_b v_b) / (γ_a m_a + γ_b m_b)
+  // (non-relativistic approx for V_cm itself – sufficient for game)
+  const totalRelMass = ga * ma + gb * mb;
+  const vcm = (ga * ma * va_n + gb * mb * vb_n) / totalRelMass;
+
+  // Velocities in CoM frame
+  const ua = va_n - vcm;
+  const ub = vb_n - vcm;
+
+  // In CoM frame, elastic collision reverses velocities (equal mass)
+  // For unequal mass we still reverse since we're using 1-D elastic
+  const ua_after = -ua * RESTITUTION;
+  const ub_after = -ub * RESTITUTION;
+
+  // Boost back to lab frame using relativistic velocity addition
+  const va_n_new = relVelAdd(ua_after, vcm);
+  const vb_n_new = relVelAdd(ub_after, vcm);
+
+  // Clamp
+  const va_n_clamped = Math.sign(va_n_new) * clampSpeed(Math.abs(va_n_new));
+  const vb_n_clamped = Math.sign(vb_n_new) * clampSpeed(Math.abs(vb_n_new));
+
+  // Recombine normal + tangent
+  a.vx = va_n_clamped * nx + va_tx;
+  a.vy = va_n_clamped * ny + va_ty;
+  b.vx = vb_n_clamped * nx + vb_tx;
+  b.vy = vb_n_clamped * ny + vb_ty;
+
+  // Final speed clamp
+  let sa = Vec.len({ x: a.vx, y: a.vy });
+  if (sa > C * 0.9999) { const f = (C * 0.9999) / sa; a.vx *= f; a.vy *= f; }
+  let sb = Vec.len({ x: b.vx, y: b.vy });
+  if (sb > C * 0.9999) { const f = (C * 0.9999) / sb; b.vx *= f; b.vy *= f; }
+}
+
+// ── Pocket check ──────────────────────────────────────────
+function checkPockets() {
+  for (const ball of balls) {
+    if (!ball.active) continue;
+    for (const p of POCKETS) {
+      const d = Vec.len(Vec.sub(ball, p));
+      if (d < POCKET_R) {
+        ball.active = false;
+        pocketed.push(ball.number);
+        if (ball.number === 0) {
+          // Re-spot cue ball
+          setTimeout(() => {
+            ball.x = TABLE_W * 0.25;
+            ball.y = TABLE_H / 2;
+            ball.vx = 0;
+            ball.vy = 0;
+            ball.active = true;
+          }, 600);
+        }
+      }
+    }
+  }
+}
+
+// ── Cue aiming state ─────────────────────────────────────
+let aiming = false;
+let aimStart = { x: 0, y: 0 };
+let aimEnd   = { x: 0, y: 0 };
+
+function cueBall() {
+  return balls.find(b => b.number === 0 && b.active);
+}
+
+function allStopped() {
+  return balls.every(b => !b.active || b.speed() < MIN_SPEED);
+}
+
+canvas.addEventListener("mousedown", (e) => {
+  if (!allStopped()) return;
+  const cue = cueBall();
+  if (!cue) return;
+  const rect = canvas.getBoundingClientRect();
+  const mx = e.clientX - rect.left;
+  const my = e.clientY - rect.top;
+  const d = Vec.len(Vec.sub({ x: mx, y: my }, cue));
+  if (d < 40) {
+    aiming = true;
+    aimStart = { x: mx, y: my };
+    aimEnd   = { x: mx, y: my };
+  }
+});
+
+canvas.addEventListener("mousemove", (e) => {
+  if (!aiming) return;
+  const rect = canvas.getBoundingClientRect();
+  aimEnd = { x: e.clientX - rect.left, y: e.clientY - rect.top };
+});
+
+canvas.addEventListener("mouseup", () => {
+  if (!aiming) return;
+  aiming = false;
+  const cue = cueBall();
+  if (!cue) return;
+
+  const dx = aimStart.x - aimEnd.x;
+  const dy = aimStart.y - aimEnd.y;
+  const power = Math.min(Vec.len({ x: dx, y: dy }) * 3, C * 0.95);
+  if (power < 5) return;
+
+  const dir = Vec.norm({ x: dx, y: dy });
+  cue.vx = dir.x * power;
+  cue.vy = dir.y * power;
+});
+
+// ── Slider ────────────────────────────────────────────────
+sliderC.addEventListener("input", () => {
+  C = Number(sliderC.value);
+  valC.textContent = C;
+});
+
+btnReset.addEventListener("click", () => { initBalls(); });
+
+// ── Drawing helpers ───────────────────────────────────────
+function drawTable() {
+  // Felt
+  ctx.fillStyle = "#0b6623";
+  ctx.fillRect(0, 0, TABLE_W, TABLE_H);
+
+  // Cushions
+  ctx.fillStyle = "#3d2b1f";
+  ctx.fillRect(0, 0, TABLE_W, CUSHION);
+  ctx.fillRect(0, TABLE_H - CUSHION, TABLE_W, CUSHION);
+  ctx.fillRect(0, 0, CUSHION, TABLE_H);
+  ctx.fillRect(TABLE_W - CUSHION, 0, CUSHION, TABLE_H);
+
+  // Inner cushion edge
+  ctx.strokeStyle = "#5a3d2b";
+  ctx.lineWidth = 2;
+  ctx.strokeRect(CUSHION, CUSHION, TABLE_W - 2 * CUSHION, TABLE_H - 2 * CUSHION);
+
+  // Pockets
+  for (const p of POCKETS) {
+    ctx.beginPath();
+    ctx.arc(p.x, p.y, POCKET_R, 0, Math.PI * 2);
+    ctx.fillStyle = "#111";
+    ctx.fill();
+  }
+
+  // Head string
+  ctx.setLineDash([5, 5]);
+  ctx.strokeStyle = "rgba(255,255,255,0.12)";
+  ctx.beginPath();
+  ctx.moveTo(TABLE_W * 0.33, CUSHION);
+  ctx.lineTo(TABLE_W * 0.33, TABLE_H - CUSHION);
+  ctx.stroke();
+  ctx.setLineDash([]);
+}
+
+function drawBall(ball) {
+  if (!ball.active) return;
+
+  const speed = ball.speed();
+  const g = gamma(speed);
+  const showContraction = chkContraction.checked;
+
+  // Doppler color: observer assumed at centre of table
+  const obsAngle = Math.atan2(TABLE_H / 2 - ball.y, TABLE_W / 2 - ball.x);
+  const col = ball.dopplerColor(obsAngle);
+
+  ctx.save();
+  ctx.translate(ball.x, ball.y);
+
+  if (showContraction && speed > 2) {
+    // Length contraction: shrink along velocity direction
+    const angle = Math.atan2(ball.vy, ball.vx);
+    ctx.rotate(angle);
+    const contractFactor = 1 / g;  // Lorentz contraction factor
+    ctx.scale(contractFactor, 1);
+    ctx.rotate(-angle);
+  }
+
+  // Shadow
+  ctx.beginPath();
+  ctx.arc(1, 1, ball.r + 1, 0, Math.PI * 2);
+  ctx.fillStyle = "rgba(0,0,0,0.3)";
+  ctx.fill();
+
+  // Ball body
+  ctx.beginPath();
+  ctx.arc(0, 0, ball.r, 0, Math.PI * 2);
+  ctx.fillStyle = col;
+  ctx.fill();
+  ctx.strokeStyle = "rgba(0,0,0,0.5)";
+  ctx.lineWidth = 1;
+  ctx.stroke();
+
+  // Highlight
+  ctx.beginPath();
+  ctx.arc(-ball.r * 0.3, -ball.r * 0.3, ball.r * 0.35, 0, Math.PI * 2);
+  ctx.fillStyle = "rgba(255,255,255,0.35)";
+  ctx.fill();
+
+  // Number label
+  if (ball.number > 0) {
+    // Stripe band for balls 9-15
+    if (ball.number >= 9) {
+      ctx.beginPath();
+      ctx.rect(-ball.r, -ball.r * 0.35, ball.r * 2, ball.r * 0.7);
+      ctx.fillStyle = "#fff";
+      ctx.fill();
+    }
+    ctx.fillStyle = ball.number >= 9 ? "#000" : "#fff";
+    if (ball.number === 8) ctx.fillStyle = "#fff";
+    ctx.font = "bold 9px sans-serif";
+    ctx.textAlign = "center";
+    ctx.textBaseline = "middle";
+    ctx.fillText(ball.number, 0, 0);
+  }
+
+  ctx.restore();
+
+  // Speed indicator ring for fast-moving balls
+  if (speed > C * 0.3) {
+    const alpha = Math.min((speed / C - 0.3) / 0.7, 1);
+    ctx.beginPath();
+    ctx.arc(ball.x, ball.y, ball.r + 4, 0, Math.PI * 2);
+    ctx.strokeStyle = "rgba(100,180,255," + (alpha * 0.6) + ")";
+    ctx.lineWidth = 2;
+    ctx.stroke();
+  }
+}
+
+function drawCue() {
+  if (!aiming) return;
+  const cue = cueBall();
+  if (!cue) return;
+
+  const dx = aimEnd.x - aimStart.x;
+  const dy = aimEnd.y - aimStart.y;
+  const pullDist = Vec.len({ x: dx, y: dy });
+  const dir = Vec.norm({ x: aimStart.x - aimEnd.x, y: aimStart.y - aimEnd.y });
+
+  // Power indicator
+  const power = Math.min(pullDist * 3, C * 0.95);
+  const powerFrac = power / (C * 0.95);
+
+  // Cue stick line
+  const startPt = { x: cue.x - dir.x * (BALL_R + 4 + pullDist * 0.3), y: cue.y - dir.y * (BALL_R + 4 + pullDist * 0.3) };
+  const endPt   = { x: startPt.x - dir.x * 120, y: startPt.y - dir.y * 120 };
+
+  ctx.beginPath();
+  ctx.moveTo(startPt.x, startPt.y);
+  ctx.lineTo(endPt.x, endPt.y);
+  ctx.strokeStyle = "#c9a45c";
+  ctx.lineWidth = 4;
+  ctx.stroke();
+
+  // Aiming dotted line
+  ctx.setLineDash([4, 6]);
+  ctx.beginPath();
+  ctx.moveTo(cue.x, cue.y);
+  ctx.lineTo(cue.x + dir.x * 300, cue.y + dir.y * 300);
+  ctx.strokeStyle = "rgba(255,255,255,0.2)";
+  ctx.lineWidth = 1;
+  ctx.stroke();
+  ctx.setLineDash([]);
+
+  // Power bar
+  ctx.fillStyle = "rgba(0,0,0,0.5)";
+  ctx.fillRect(TABLE_W - 30, CUSHION, 14, TABLE_H - 2 * CUSHION);
+  const barH = (TABLE_H - 2 * CUSHION) * powerFrac;
+  const r = Math.round(255 * powerFrac);
+  const g = Math.round(255 * (1 - powerFrac));
+  ctx.fillStyle = "rgb(" + r + "," + g + ",0)";
+  ctx.fillRect(TABLE_W - 30, TABLE_H - CUSHION - barH, 14, barH);
+  ctx.font = "9px sans-serif";
+  ctx.fillStyle = "#fff";
+  ctx.textAlign = "center";
+  ctx.fillText(Math.round(power), TABLE_W - 23, TABLE_H - CUSHION + 12);
+}
+
+function drawHUD() {
+  const cue = cueBall();
+  if (!cue) return;
+  const speed = cue.speed();
+  const g = gamma(speed);
+  const beta = speed / C;
+
+  ctx.font = "11px monospace";
+  ctx.fillStyle = "rgba(255,255,255,0.8)";
+  ctx.textAlign = "left";
+  ctx.fillText("Cue: v=" + speed.toFixed(1) + " px/s  β=" + beta.toFixed(4) +
+               "  γ=" + g.toFixed(4) + "  p=" + cue.momentum().toFixed(1), CUSHION + 4, TABLE_H - 6);
+
+  // Pocketed count
+  ctx.textAlign = "right";
+  ctx.fillText("Pocketed: " + pocketed.filter(n => n > 0).length + "/15  c=" + C + " px/s",
+               TABLE_W - CUSHION - 4, TABLE_H - 6);
+}
+
+// ── Game loop ─────────────────────────────────────────────
+let lastTime = 0;
+let lastInfoUpdate = 0;
+const INFO_UPDATE_INTERVAL = 100; // ms between info panel updates
+const SUB_STEPS = 4;  // physics sub-steps per frame
+
+function gameLoop(timestamp) {
+  const dt = Math.min((timestamp - lastTime) / 1000, 0.05);
+  lastTime = timestamp;
+
+  const subDt = dt / SUB_STEPS;
+
+  for (let step = 0; step < SUB_STEPS; step++) {
+    for (const ball of balls) {
+      if (ball.active) ball.update(subDt);
+    }
+    // Ball–ball collisions
+    for (let i = 0; i < balls.length; i++) {
+      if (!balls[i].active) continue;
+      for (let j = i + 1; j < balls.length; j++) {
+        if (!balls[j].active) continue;
+        resolveCollision(balls[i], balls[j]);
+      }
+    }
+    // Wall collisions
+    for (const ball of balls) {
+      if (ball.active) wallCollisions(ball);
+    }
+    checkPockets();
+  }
+
+  // ── Draw ──
+  drawTable();
+  for (const ball of balls) drawBall(ball);
+  drawCue();
+  drawHUD();
+
+  // Info panel update (throttled)
+  if (timestamp - lastInfoUpdate > INFO_UPDATE_INTERVAL) {
+    lastInfoUpdate = timestamp;
+    const moving = balls.filter(b => b.active && b.speed() > MIN_SPEED);
+    if (moving.length > 0) {
+      const fastest = moving.reduce((a, b) => a.speed() > b.speed() ? a : b);
+      const fs = fastest.speed();
+      infoPanel.textContent =
+        "Fastest ball #" + fastest.number + ": v=" + fs.toFixed(1) +
+        " β=" + (fs / C).toFixed(3) + " γ=" + gamma(fs).toFixed(3) +
+        " | Contraction factor: " + (1 / gamma(fs)).toFixed(3);
+    } else {
+      infoPanel.textContent = "All balls at rest. Click & drag the cue ball to shoot.";
+    }
+  }
+
+  requestAnimationFrame(gameLoop);
+}
+
+// ── Start ─────────────────────────────────────────────────
+initBalls();
+requestAnimationFrame(gameLoop);
+</script>
+</body>
+</html>
