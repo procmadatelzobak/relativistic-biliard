@@ -657,6 +657,8 @@ function drawHUD() {
 
 // ── Game loop ─────────────────────────────────────────────
 let lastTime = 0;
+let lastInfoUpdate = 0;
+const INFO_UPDATE_INTERVAL = 100; // ms between info panel updates
 const SUB_STEPS = 4;  // physics sub-steps per frame
 
 function gameLoop(timestamp) {
@@ -691,7 +693,8 @@ function gameLoop(timestamp) {
   drawHUD();
 
   // Info panel update (throttled)
-  if (Math.round(timestamp) % 5 === 0) {
+  if (timestamp - lastInfoUpdate > INFO_UPDATE_INTERVAL) {
+    lastInfoUpdate = timestamp;
     const moving = balls.filter(b => b.active && b.speed() > MIN_SPEED);
     if (moving.length > 0) {
       const fastest = moving.reduce((a, b) => a.speed() > b.speed() ? a : b);
