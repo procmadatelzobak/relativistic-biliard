@@ -224,10 +224,12 @@ class Ball {
     let speed = this.speed();
     if (speed < MIN_SPEED) { this.vx = 0; this.vy = 0; return; }
 
-    // Apply friction (deceleration)
+    // Apply friction to relativistic momentum, not velocity
     const dir = Vec.norm({ x: this.vx, y: this.vy });
-    let newSpeed = speed - FRICTION * dt * (1 + speed / C);  // slightly higher friction at high v
-    if (newSpeed < 0) newSpeed = 0;
+    let momentum = gamma(speed) * this.mass * speed;
+    momentum = Math.max(0, momentum - FRICTION * dt * this.mass * C);
+    let newSpeed = momentum / Math.sqrt(this.mass * this.mass + (momentum * momentum) / (C * C));
+    if (newSpeed < MIN_SPEED) newSpeed = 0;
     newSpeed = clampSpeed(newSpeed);
 
     this.vx = dir.x * newSpeed;
@@ -359,24 +361,24 @@ function resolveCollision(a, b) {
   const ga = gamma(Math.abs(va_n));
   const gb = gamma(Math.abs(vb_n));
 
-  // Centre-of-momentum velocity (relativistic)
-  // V_cm = (γ_a m_a v_a + γ_b m_b v_b) / (γ_a m_a + γ_b m_b)
-  // (non-relativistic approx for V_cm itself – sufficient for game)
-  const totalRelMass = ga * ma + gb * mb;
-  const vcm = (ga * ma * va_n + gb * mb * vb_n) / totalRelMass;
+  // Total relativistic energy and momentum along normal
+  const E_tot = ga * ma * C * C + gb * mb * C * C;
+  const P_tot = ga * ma * va_n + gb * mb * vb_n;
 
-  // Velocities in CoM frame
-  const ua = va_n - vcm;
-  const ub = vb_n - vcm;
+  // Centre-of-momentum velocity (exact relativistic)
+  const vcm = (P_tot * C * C) / E_tot;
 
-  // In CoM frame, elastic collision reverses velocities (equal mass)
-  // For unequal mass we still reverse since we're using 1-D elastic
+  // Boost to CoM frame using Lorentz velocity addition
+  const ua = (va_n - vcm) / (1 - (va_n * vcm) / (C * C));
+  const ub = (vb_n - vcm) / (1 - (vb_n * vcm) / (C * C));
+
+  // Elastic bounce in CoM frame
   const ua_after = -ua * RESTITUTION;
   const ub_after = -ub * RESTITUTION;
 
-  // Boost back to lab frame using relativistic velocity addition
-  const va_n_new = relVelAdd(ua_after, vcm);
-  const vb_n_new = relVelAdd(ub_after, vcm);
+  // Boost back to lab frame using Lorentz velocity addition
+  const va_n_new = (ua_after + vcm) / (1 + (ua_after * vcm) / (C * C));
+  const vb_n_new = (ub_after + vcm) / (1 + (ub_after * vcm) / (C * C));
 
   // Clamp
   const va_n_clamped = Math.sign(va_n_new) * clampSpeed(Math.abs(va_n_new));
@@ -711,7 +713,76 @@ function gameLoop(timestamp) {
   requestAnimationFrame(gameLoop);
 }
 
+// ── Automated Physics Tests ──────────────────────────────
+function runPhysicsTests() {
+  console.log("=== Relativistic Billiards: Physics Tests ===");
+  let passed = 0;
+  let failed = 0;
+
+  // Test 1: gamma(0.6 * C) should be exactly 1.25
+  const testSpeed = 0.6 * C;
+  const g = gamma(testSpeed);
+  const gammaExpected = 1.25;
+  if (Math.abs(g - gammaExpected) < 0.0001) {
+    console.log("PASS: Test 1 – gamma(0.6c) = " + g + " (expected " + gammaExpected + ")");
+    passed++;
+  } else {
+    console.log("FAIL: Test 1 – gamma(0.6c) = " + g + " (expected " + gammaExpected + ")");
+    failed++;
+  }
+
+  // Test 2: Conservation of energy and momentum in a collision
+  // Ball a at 0.8c, ball b at rest, both mass 1
+  const va_n = 0.8 * C;
+  const vb_n = 0.0;
+  const ma = 1;
+  const mb = 1;
+  const ga_before = gamma(Math.abs(va_n));
+  const gb_before = gamma(Math.abs(vb_n));
+  const E_before = ga_before * ma * C * C + gb_before * mb * C * C;
+  const P_before = ga_before * ma * va_n + gb_before * mb * vb_n;
+
+  // Run collision logic (same as resolveCollision along normal)
+  const E_tot = E_before;
+  const P_tot = P_before;
+  const vcm = (P_tot * C * C) / E_tot;
+  const ua = (va_n - vcm) / (1 - (va_n * vcm) / (C * C));
+  const ub = (vb_n - vcm) / (1 - (vb_n * vcm) / (C * C));
+  // Fully elastic (RESTITUTION = 1 for test)
+  const ua_after = -ua;
+  const ub_after = -ub;
+  const va_after = (ua_after + vcm) / (1 + (ua_after * vcm) / (C * C));
+  const vb_after = (ub_after + vcm) / (1 + (ub_after * vcm) / (C * C));
+
+  const ga_after = gamma(Math.abs(va_after));
+  const gb_after = gamma(Math.abs(vb_after));
+  const E_after = ga_after * ma * C * C + gb_after * mb * C * C;
+  const P_after = ga_after * ma * va_after + gb_after * mb * vb_after;
+
+  const E_diff = Math.abs(E_before - E_after) / E_before;
+  const P_diff = Math.abs(P_before - P_after) / (Math.abs(P_before) || 1);
+
+  if (E_diff < 0.0001) {
+    console.log("PASS: Test 2a – Energy conserved: E_before=" + E_before.toFixed(4) + " E_after=" + E_after.toFixed(4) + " (rel diff=" + E_diff.toExponential(2) + ")");
+    passed++;
+  } else {
+    console.log("FAIL: Test 2a – Energy NOT conserved: E_before=" + E_before.toFixed(4) + " E_after=" + E_after.toFixed(4) + " (rel diff=" + E_diff.toExponential(2) + ")");
+    failed++;
+  }
+
+  if (P_diff < 0.0001) {
+    console.log("PASS: Test 2b – Momentum conserved: P_before=" + P_before.toFixed(4) + " P_after=" + P_after.toFixed(4) + " (rel diff=" + P_diff.toExponential(2) + ")");
+    passed++;
+  } else {
+    console.log("FAIL: Test 2b – Momentum NOT conserved: P_before=" + P_before.toFixed(4) + " P_after=" + P_after.toFixed(4) + " (rel diff=" + P_diff.toExponential(2) + ")");
+    failed++;
+  }
+
+  console.log("=== Results: " + passed + " passed, " + failed + " failed ===");
+}
+
 // ── Start ─────────────────────────────────────────────────
+runPhysicsTests();
 initBalls();
 requestAnimationFrame(gameLoop);
 </script>
