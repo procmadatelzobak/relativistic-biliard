@@ -231,7 +231,7 @@ class Ball {
 
   update(dt) {
     if (!this.active) return;
-    if (isNaN(this.x) || isNaN(this.vx) || isNaN(this.vy)) {
+    if (isNaN(this.x) || isNaN(this.y) || isNaN(this.vx) || isNaN(this.vy)) {
       this.vx = 0; this.vy = 0;
       this.active = false;
       return;
@@ -829,7 +829,7 @@ function drawGraph() {
   const plotH = gh - 20;
   ctx.beginPath();
   for (let i = 0; i < cueMomentumHistory.length; i++) {
-    const px = gx + pad + (i / (cueMomentumHistory.length - 1)) * plotW;
+    const px = gx + pad + (i / Math.max(cueMomentumHistory.length - 1, 1)) * plotW;
     const py = gy + gh - pad - (cueMomentumHistory[i] / maxP) * plotH;
     if (i === 0) ctx.moveTo(px, py);
     else ctx.lineTo(px, py);
