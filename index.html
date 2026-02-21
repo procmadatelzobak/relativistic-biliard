@@ -37,6 +37,10 @@ canvas {
   border-radius: 8px;
   cursor: crosshair;
   display: block;
+  max-width: 95vw;
+  max-height: 70vh;
+  width: 100%;
+  object-fit: contain;
 }
 #hud {
   margin-top: 6px;
@@ -69,8 +73,8 @@ button:hover { background: #50507a; }
 <h1>&#9733; Relativistic Billiards &#9733;</h1>
 <div id="ui-bar">
   <label>c (speed of light):
-    <input type="range" id="slider-c" min="60" max="800" value="200">
-    <span class="val" id="val-c">200</span> px/s
+    <input type="range" id="slider-c" min="100" max="1500" value="400">
+    <span class="val" id="val-c">400</span> px/s
   </label>
   <button id="btn-reset">Reset Table</button>
   <label>Show contraction: <input type="checkbox" id="chk-contraction" checked></label>
@@ -110,19 +114,19 @@ const chkDoppler     = document.getElementById("chk-doppler");
 const infoPanel      = document.getElementById("info-panel");
 
 // ── Constants & Config ────────────────────────────────────
-const TABLE_W = 800;
-const TABLE_H = 400;
-const CUSHION  = 28;           // border cushion thickness
-const POCKET_R = 18;           // pocket radius
-const BALL_R   = 11;           // rest-frame ball radius
-const FRICTION = 0.35;         // deceleration (px/s²)
+const TABLE_W = 1600;
+const TABLE_H = 800;
+const CUSHION  = 56;           // border cushion thickness
+const POCKET_R = 36;           // pocket radius
+const BALL_R   = 22;           // rest-frame ball radius
+const FRICTION = 0.05;         // deceleration (px/s²)
 const RESTITUTION = 0.96;      // coefficient of restitution for walls
 const MIN_SPEED = 1;           // below this, ball stops
 
 canvas.width  = TABLE_W;
 canvas.height = TABLE_H;
 
-let C = 200;  // speed of light in px/s (tuneable)
+let C = 400;  // speed of light in px/s (tuneable)
 
 // ── Vector helpers ────────────────────────────────────────
 const Vec = {
@@ -311,10 +315,23 @@ function wallCollisions(ball) {
   const top    = CUSHION + ball.r;
   const bottom = TABLE_H - CUSHION - ball.r;
 
-  if (ball.x < left)   { ball.x = left;   ball.vx = Math.abs(ball.vx) * RESTITUTION; }
-  if (ball.x > right)  { ball.x = right;  ball.vx = -Math.abs(ball.vx) * RESTITUTION; }
-  if (ball.y < top)    { ball.y = top;    ball.vy = Math.abs(ball.vy) * RESTITUTION; }
-  if (ball.y > bottom) { ball.y = bottom; ball.vy = -Math.abs(ball.vy) * RESTITUTION; }
+  let hit = false;
+  if (ball.x < left)   { ball.x = left;   ball.vx = -ball.vx; hit = true; }
+  if (ball.x > right)  { ball.x = right;  ball.vx = -ball.vx; hit = true; }
+  if (ball.y < top)    { ball.y = top;    ball.vy = -ball.vy; hit = true; }
+  if (ball.y > bottom) { ball.y = bottom; ball.vy = -ball.vy; hit = true; }
+
+  if (hit) {
+    const speed = ball.speed();
+    if (speed < MIN_SPEED) { ball.vx = 0; ball.vy = 0; return; }
+    const p = gamma(speed) * ball.mass * speed;
+    const p_new = p * RESTITUTION;
+    // Inverse relativistic momentum formula: v = p / sqrt(m² + p²/c²)
+    const v_new = p_new / Math.sqrt(ball.mass * ball.mass + (p_new * p_new) / (C * C));
+    const scale = v_new / speed;
+    ball.vx *= scale;
+    ball.vy *= scale;
+  }
 }
 
 // ── Collision: ball ↔ ball (relativistic) ─────────────────
@@ -426,6 +443,14 @@ let aiming = false;
 let aimStart = { x: 0, y: 0 };
 let aimEnd   = { x: 0, y: 0 };
 
+function canvasMouse(e) {
+  const rect = canvas.getBoundingClientRect();
+  return {
+    x: (e.clientX - rect.left) * (canvas.width / rect.width),
+    y: (e.clientY - rect.top) * (canvas.height / rect.height),
+  };
+}
+
 function cueBall() {
   return balls.find(b => b.number === 0 && b.active);
 }
@@ -438,21 +463,18 @@ canvas.addEventListener("mousedown", (e) => {
   if (!allStopped()) return;
   const cue = cueBall();
   if (!cue) return;
-  const rect = canvas.getBoundingClientRect();
-  const mx = e.clientX - rect.left;
-  const my = e.clientY - rect.top;
-  const d = Vec.len(Vec.sub({ x: mx, y: my }, cue));
+  const m = canvasMouse(e);
+  const d = Vec.len(Vec.sub(m, cue));
   if (d < 40) {
     aiming = true;
-    aimStart = { x: mx, y: my };
-    aimEnd   = { x: mx, y: my };
+    aimStart = m;
+    aimEnd   = m;
   }
 });
 
 canvas.addEventListener("mousemove", (e) => {
   if (!aiming) return;
-  const rect = canvas.getBoundingClientRect();
-  aimEnd = { x: e.clientX - rect.left, y: e.clientY - rect.top };
+  aimEnd = canvasMouse(e);
 });
 
 canvas.addEventListener("mouseup", () => {
