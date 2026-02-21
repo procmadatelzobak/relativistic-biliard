@@ -231,6 +231,11 @@ class Ball {
 
   update(dt) {
     if (!this.active) return;
+    if (isNaN(this.x) || isNaN(this.y) || isNaN(this.vx) || isNaN(this.vy)) {
+      this.vx = 0; this.vy = 0;
+      this.active = false;
+      return;
+    }
     let speed = this.speed();
     if (speed < MIN_SPEED) { this.vx = 0; this.vy = 0; return; }
 
@@ -289,6 +294,7 @@ const BALL_COLORS = [
 
 let balls = [];
 let pocketed = [];
+let cueMomentumHistory = [];
 
 function rackPosition(row, col) {
   const startX = TABLE_W * 0.68;
@@ -476,7 +482,7 @@ function cueBall() {
 }
 
 function allStopped() {
-  return balls.every(b => !b.active || b.speed() < MIN_SPEED);
+  return balls.every(b => !b.active || isNaN(b.speed()) || b.speed() < MIN_SPEED);
 }
 
 canvas.addEventListener("mousedown", (e) => {
@@ -489,23 +495,26 @@ canvas.addEventListener("mousedown", (e) => {
     aiming = true;
     aimStart = m;
     aimEnd   = m;
+    cueMomentumHistory = [];
   }
 });
 
-canvas.addEventListener("mousemove", (e) => {
+window.addEventListener("mousemove", (e) => {
   if (!aiming) return;
   aimEnd = canvasMouse(e);
 });
 
-canvas.addEventListener("mouseup", () => {
+window.addEventListener("mouseup", () => {
   if (!aiming) return;
   aiming = false;
   const cue = cueBall();
   if (!cue) return;
 
-  const dx = aimStart.x - aimEnd.x;
-  const dy = aimStart.y - aimEnd.y;
-  const power = Math.min(Vec.len({ x: dx, y: dy }) * 3, C * 0.95);
+  const dx = aimEnd.x - cue.x;
+  const dy = aimEnd.y - cue.y;
+  const pullDist = Vec.len({ x: dx, y: dy });
+  const beta = 1 - Math.exp(-pullDist / 300);
+  const power = Math.min(beta * C, C * 0.999);
   if (power < 2) return;
 
   const dir = Vec.norm({ x: dx, y: dy });
@@ -522,7 +531,7 @@ sliderC.addEventListener("input", () => {
 btnReset.addEventListener("click", () => { initBalls(); });
 
 // ── Drawing helpers ───────────────────────────────────────
-const GRID_WARP_STRENGTH   = 150000;  // how strongly balls pull grid points
+const GRID_WARP_STRENGTH   = 500000;  // how strongly balls pull grid points
 const GRID_WARP_SMOOTHING  = 5000;  // softening factor to avoid singularity at dist=0
 
 function gridWarp(x, y, activeBalls) {
@@ -530,7 +539,7 @@ function gridWarp(x, y, activeBalls) {
   for (const ball of activeBalls) {
     const dx = ball.x - x, dy = ball.y - y;
     const dist = Math.sqrt(dx * dx + dy * dy) || 1;
-    const relMass = gamma(ball.speed()) * ball.mass;
+    const relMass = (gamma(ball.speed()) - 1) * ball.mass;
     const pull = relMass * GRID_WARP_STRENGTH / (dist * dist + GRID_WARP_SMOOTHING);
     ox += (dx / dist) * pull;
     oy += (dy / dist) * pull;
@@ -703,31 +712,53 @@ function drawCue() {
   const cue = cueBall();
   if (!cue) return;
 
-  const dx = aimEnd.x - aimStart.x;
-  const dy = aimEnd.y - aimStart.y;
+  const dx = aimEnd.x - cue.x;
+  const dy = aimEnd.y - cue.y;
   const pullDist = Vec.len({ x: dx, y: dy });
-  const dir = Vec.norm({ x: aimStart.x - aimEnd.x, y: aimStart.y - aimEnd.y });
+  const dir = Vec.norm({ x: dx, y: dy });
 
-  // Power indicator
-  const power = Math.min(pullDist * 3, C * 0.95);
-  const powerFrac = power / (C * 0.95);
+  // Asymptotic power scaling
+  const beta = 1 - Math.exp(-pullDist / 300);
+  const power = Math.min(beta * C, C * 0.999);
+  const powerFrac = power / (C * 0.999);
 
-  // Cue stick line
-  const startPt = { x: cue.x - dir.x * (BALL_R + 4 + pullDist * 0.3), y: cue.y - dir.y * (BALL_R + 4 + pullDist * 0.3) };
-  const endPt   = { x: startPt.x - dir.x * 120, y: startPt.y - dir.y * 120 };
+  // Glowing forward-pointing vector arrow from cue ball toward cursor
+  const arrowLen = 40 + powerFrac * 180;
+  const tipX = cue.x + dir.x * (BALL_R + arrowLen);
+  const tipY = cue.y + dir.y * (BALL_R + arrowLen);
+  const baseX = cue.x + dir.x * (BALL_R + 4);
+  const baseY = cue.y + dir.y * (BALL_R + 4);
 
+  // Arrow shaft glow
+  ctx.save();
+  ctx.shadowColor = "rgba(100,200,255,0.8)";
+  ctx.shadowBlur = 12;
   ctx.beginPath();
-  ctx.moveTo(startPt.x, startPt.y);
-  ctx.lineTo(endPt.x, endPt.y);
-  ctx.strokeStyle = "#c9a45c";
-  ctx.lineWidth = 4;
+  ctx.moveTo(baseX, baseY);
+  ctx.lineTo(tipX, tipY);
+  ctx.strokeStyle = "rgba(100,200,255," + (0.5 + powerFrac * 0.5) + ")";
+  ctx.lineWidth = 3;
+  ctx.stroke();
+  ctx.restore();
+
+  // Arrowhead
+  const headLen = 14;
+  const headAngle = Math.PI / 6;
+  const angle = Math.atan2(dy, dx);
+  ctx.beginPath();
+  ctx.moveTo(tipX, tipY);
+  ctx.lineTo(tipX - headLen * Math.cos(angle - headAngle), tipY - headLen * Math.sin(angle - headAngle));
+  ctx.moveTo(tipX, tipY);
+  ctx.lineTo(tipX - headLen * Math.cos(angle + headAngle), tipY - headLen * Math.sin(angle + headAngle));
+  ctx.strokeStyle = "rgba(100,200,255," + (0.6 + powerFrac * 0.4) + ")";
+  ctx.lineWidth = 3;
   ctx.stroke();
 
-  // Aiming dotted line
+  // Aiming dotted line extending further
   ctx.setLineDash([4, 6]);
   ctx.beginPath();
-  ctx.moveTo(cue.x, cue.y);
-  ctx.lineTo(cue.x + dir.x * 300, cue.y + dir.y * 300);
+  ctx.moveTo(tipX, tipY);
+  ctx.lineTo(cue.x + dir.x * 400, cue.y + dir.y * 400);
   ctx.strokeStyle = "rgba(255,255,255,0.2)";
   ctx.lineWidth = 1;
   ctx.stroke();
@@ -744,7 +775,7 @@ function drawCue() {
   ctx.font = "9px sans-serif";
   ctx.fillStyle = "#fff";
   ctx.textAlign = "center";
-  ctx.fillText(Math.round(power), TABLE_W - 23, TABLE_H - CUSHION + 12);
+  ctx.fillText((power / C).toFixed(3) + "c", TABLE_W - 23, TABLE_H - CUSHION + 12);
 }
 
 function drawHUD() {
@@ -764,6 +795,48 @@ function drawHUD() {
   ctx.textAlign = "right";
   ctx.fillText("Pocketed: " + pocketed.filter(n => n > 0).length + "/15  c=" + C + " px/s",
                TABLE_W - CUSHION - 4, TABLE_H - 6);
+}
+
+function drawGraph() {
+  if (cueMomentumHistory.length < 2) return;
+  const gw = 250, gh = 150;
+  const gx = TABLE_W - gw - 20;
+  const gy = TABLE_H - gh - 30;
+
+  // Background
+  ctx.fillStyle = "rgba(0,0,0,0.55)";
+  ctx.fillRect(gx, gy, gw, gh);
+  ctx.strokeStyle = "rgba(255,255,255,0.25)";
+  ctx.lineWidth = 1;
+  ctx.strokeRect(gx, gy, gw, gh);
+
+  // Label
+  ctx.font = "10px monospace";
+  ctx.fillStyle = "rgba(255,255,255,0.7)";
+  ctx.textAlign = "left";
+  ctx.fillText("Cue Momentum (γmv)", gx + 6, gy + 12);
+
+  // Auto-scale Y
+  let maxP = 0;
+  for (let i = 0; i < cueMomentumHistory.length; i++) {
+    if (cueMomentumHistory[i] > maxP) maxP = cueMomentumHistory[i];
+  }
+  if (maxP === 0) maxP = 1;
+
+  // Plot
+  const pad = 4;
+  const plotW = gw - pad * 2;
+  const plotH = gh - 20;
+  ctx.beginPath();
+  for (let i = 0; i < cueMomentumHistory.length; i++) {
+    const px = gx + pad + (i / Math.max(cueMomentumHistory.length - 1, 1)) * plotW;
+    const py = gy + gh - pad - (cueMomentumHistory[i] / maxP) * plotH;
+    if (i === 0) ctx.moveTo(px, py);
+    else ctx.lineTo(px, py);
+  }
+  ctx.strokeStyle = "rgba(100,200,255,0.9)";
+  ctx.lineWidth = 1.5;
+  ctx.stroke();
 }
 
 // ── Game loop ─────────────────────────────────────────────
@@ -804,11 +877,21 @@ function gameLoop(timestamp) {
     checkPockets();
   }
 
+  // Record cue ball momentum for graph
+  if (!allStopped()) {
+    const cue = cueBall();
+    if (cue) {
+      cueMomentumHistory.push(cue.momentum());
+      if (cueMomentumHistory.length > 300) cueMomentumHistory.shift();
+    }
+  }
+
   // ── Draw ──
   drawTable();
   for (const ball of balls) drawBall(ball);
   drawCue();
   drawHUD();
+  drawGraph();
 
   // Info panel update (throttled)
   if (timestamp - lastInfoUpdate > INFO_UPDATE_INTERVAL) {
@@ -961,6 +1044,79 @@ function runPhysicsTests() {
     passed++;
   } else {
     console.log("FAIL: Test 7 – drawGrid function missing");
+    failed++;
+  }
+
+  // Test 8: gridWarp returns zero displacement for stationary balls (kinetic-energy-only warp)
+  const stationaryBall = new Ball(400, 400, "#ff0000", 99, 1);
+  stationaryBall.vx = 0;
+  stationaryBall.vy = 0;
+  const warp = gridWarp(300, 300, [stationaryBall]);
+  if (warp.ox === 0 && warp.oy === 0) {
+    console.log("PASS: Test 8 – gridWarp returns zero for stationary ball");
+    passed++;
+  } else {
+    console.log("FAIL: Test 8 – gridWarp returned non-zero for stationary ball: ox=" + warp.ox + " oy=" + warp.oy);
+    failed++;
+  }
+
+  // Test 9: NaN safety net deactivates ball
+  const nanBall = new Ball(400, 400, "#ff0000", 98, 1);
+  nanBall.vx = NaN;
+  nanBall.vy = 100;
+  nanBall.active = true;
+  nanBall.update(0.016);
+  if (!nanBall.active && nanBall.vx === 0 && nanBall.vy === 0) {
+    console.log("PASS: Test 9 – NaN safety net deactivates ball and zeroes velocity");
+    passed++;
+  } else {
+    console.log("FAIL: Test 9 – NaN safety net did not work: active=" + nanBall.active + " vx=" + nanBall.vx + " vy=" + nanBall.vy);
+    failed++;
+  }
+
+  // Test 10: allStopped returns true when ball has NaN speed
+  const savedBalls = balls;
+  const nanBall2 = new Ball(400, 400, "#ff0000", 97, 1);
+  nanBall2.vx = NaN;
+  nanBall2.vy = NaN;
+  nanBall2.active = true;
+  balls = [nanBall2];
+  if (allStopped()) {
+    console.log("PASS: Test 10 – allStopped returns true for NaN-speed ball");
+    passed++;
+  } else {
+    console.log("FAIL: Test 10 – allStopped returned false for NaN-speed ball");
+    failed++;
+  }
+  balls = savedBalls;
+
+  // Test 11: Asymptotic power scaling approaches but never exceeds 0.999c
+  const testPullDist = 10000; // very large drag
+  const testBeta = 1 - Math.exp(-testPullDist / 300);
+  const testPower = Math.min(testBeta * C, C * 0.999);
+  if (testPower <= C * 0.999 && testPower > C * 0.99) {
+    console.log("PASS: Test 11 – Asymptotic power scaling: power=" + testPower.toFixed(2) + " (max=" + (C * 0.999).toFixed(2) + ")");
+    passed++;
+  } else {
+    console.log("FAIL: Test 11 – Asymptotic power out of range: power=" + testPower.toFixed(2));
+    failed++;
+  }
+
+  // Test 12: cueMomentumHistory array and drawGraph function exist
+  if (Array.isArray(cueMomentumHistory) && typeof drawGraph === "function") {
+    console.log("PASS: Test 12 – cueMomentumHistory array and drawGraph function exist");
+    passed++;
+  } else {
+    console.log("FAIL: Test 12 – cueMomentumHistory or drawGraph missing");
+    failed++;
+  }
+
+  // Test 13: GRID_WARP_STRENGTH is 500000
+  if (GRID_WARP_STRENGTH === 500000) {
+    console.log("PASS: Test 13 – GRID_WARP_STRENGTH = 500000");
+    passed++;
+  } else {
+    console.log("FAIL: Test 13 – GRID_WARP_STRENGTH = " + GRID_WARP_STRENGTH + " (expected 500000)");
     failed++;
   }
 
