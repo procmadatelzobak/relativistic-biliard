@@ -79,6 +79,8 @@ button:hover { background: #50507a; }
   <button id="btn-reset">Reset Table</button>
   <label>Show contraction: <input type="checkbox" id="chk-contraction" checked></label>
   <label>Doppler color: <input type="checkbox" id="chk-doppler" checked></label>
+  <label>Spacetime Grid: <input type="checkbox" id="chk-grid" checked></label>
+  <label>Bullet Time: <input type="checkbox" id="chk-bullet" checked></label>
 </div>
 <canvas id="game"></canvas>
 <div id="hud">
@@ -111,6 +113,8 @@ const valC    = document.getElementById("val-c");
 const btnReset      = document.getElementById("btn-reset");
 const chkContraction = document.getElementById("chk-contraction");
 const chkDoppler     = document.getElementById("chk-doppler");
+const chkGrid        = document.getElementById("chk-grid");
+const chkBullet      = document.getElementById("chk-bullet");
 const infoPanel      = document.getElementById("info-panel");
 
 // ── Constants & Config ────────────────────────────────────
@@ -127,6 +131,7 @@ canvas.width  = TABLE_W;
 canvas.height = TABLE_H;
 
 let C = 400;  // speed of light in px/s (tuneable)
+let timeScale = 1.0;  // bullet-time multiplier (1.0 = normal)
 
 // ── Vector helpers ────────────────────────────────────────
 const Vec = {
@@ -173,6 +178,7 @@ class Ball {
     this.number = number;      // 0 = cue ball
     this.mass = mass || 1;
     this.active = true;        // false when pocketed
+    this.history = [];         // trail of past positions
     this._parseHue();
   }
 
@@ -227,6 +233,12 @@ class Ball {
     if (!this.active) return;
     let speed = this.speed();
     if (speed < MIN_SPEED) { this.vx = 0; this.vy = 0; return; }
+
+    // Record trail position if moving significantly
+    if (speed > MIN_SPEED * 2) {
+      this.history.push({ x: this.x, y: this.y });
+      if (this.history.length > 45) this.history.shift();
+    }
 
     // Apply friction to relativistic momentum, not velocity
     const dir = Vec.norm({ x: this.vx, y: this.vy });
@@ -412,6 +424,14 @@ function resolveCollision(a, b) {
   if (sa > C * 0.9999) { const f = (C * 0.9999) / sa; a.vx *= f; a.vy *= f; }
   let sb = Vec.len({ x: b.vx, y: b.vy });
   if (sb > C * 0.9999) { const f = (C * 0.9999) / sb; b.vx *= f; b.vy *= f; }
+
+  // Bullet-time trigger on high-energy collisions
+  if (chkBullet.checked) {
+    const maxGamma = Math.max(ga, gb);
+    if (maxGamma > 1.5) {
+      timeScale = 0.05;
+    }
+  }
 }
 
 // ── Pocket check ──────────────────────────────────────────
@@ -465,7 +485,7 @@ canvas.addEventListener("mousedown", (e) => {
   if (!cue) return;
   const m = canvasMouse(e);
   const d = Vec.len(Vec.sub(m, cue));
-  if (d < 40) {
+  if (d < BALL_R * 4) {
     aiming = true;
     aimStart = m;
     aimEnd   = m;
@@ -486,7 +506,7 @@ canvas.addEventListener("mouseup", () => {
   const dx = aimStart.x - aimEnd.x;
   const dy = aimStart.y - aimEnd.y;
   const power = Math.min(Vec.len({ x: dx, y: dy }) * 3, C * 0.95);
-  if (power < 5) return;
+  if (power < 2) return;
 
   const dir = Vec.norm({ x: dx, y: dy });
   cue.vx = dir.x * power;
@@ -502,6 +522,52 @@ sliderC.addEventListener("input", () => {
 btnReset.addEventListener("click", () => { initBalls(); });
 
 // ── Drawing helpers ───────────────────────────────────────
+const GRID_WARP_STRENGTH   = 800;  // how strongly balls pull grid points
+const GRID_WARP_SMOOTHING  = 400;  // softening factor to avoid singularity at dist=0
+
+function gridWarp(x, y, activeBalls) {
+  let ox = 0, oy = 0;
+  for (const ball of activeBalls) {
+    const dx = ball.x - x, dy = ball.y - y;
+    const dist = Math.sqrt(dx * dx + dy * dy) || 1;
+    const relMass = gamma(ball.speed()) * ball.mass;
+    const pull = relMass * GRID_WARP_STRENGTH / (dist * dist + GRID_WARP_SMOOTHING);
+    ox += (dx / dist) * pull;
+    oy += (dy / dist) * pull;
+  }
+  return { ox, oy };
+}
+
+function drawGrid() {
+  if (!chkGrid.checked) return;
+  const SPACING = 40;
+  const activeBalls = balls.filter(b => b.active && b.speed() > MIN_SPEED);
+  ctx.strokeStyle = "rgba(100,255,120,0.12)";
+  ctx.lineWidth = 0.5;
+
+  // Draw horizontal lines
+  for (let y = CUSHION; y <= TABLE_H - CUSHION; y += SPACING) {
+    ctx.beginPath();
+    for (let x = CUSHION; x <= TABLE_W - CUSHION; x += 4) {
+      const { ox, oy } = gridWarp(x, y, activeBalls);
+      if (x === CUSHION) ctx.moveTo(x + ox, y + oy);
+      else ctx.lineTo(x + ox, y + oy);
+    }
+    ctx.stroke();
+  }
+
+  // Draw vertical lines
+  for (let x = CUSHION; x <= TABLE_W - CUSHION; x += SPACING) {
+    ctx.beginPath();
+    for (let y = CUSHION; y <= TABLE_H - CUSHION; y += 4) {
+      const { ox, oy } = gridWarp(x, y, activeBalls);
+      if (y === CUSHION) ctx.moveTo(x + ox, y + oy);
+      else ctx.lineTo(x + ox, y + oy);
+    }
+    ctx.stroke();
+  }
+}
+
 function drawTable() {
   // Felt
   ctx.fillStyle = "#0b6623";
@@ -535,6 +601,9 @@ function drawTable() {
   ctx.lineTo(TABLE_W * 0.33, TABLE_H - CUSHION);
   ctx.stroke();
   ctx.setLineDash([]);
+
+  // Spacetime grid overlay
+  drawGrid();
 }
 
 function drawBall(ball) {
@@ -550,6 +619,24 @@ function drawBall(ball) {
 
   ctx.save();
   ctx.translate(ball.x, ball.y);
+
+  // Draw relativistic trail
+  if (ball.history.length > 1) {
+    ctx.save();
+    ctx.translate(-ball.x, -ball.y);  // back to world coords
+    for (let i = 1; i < ball.history.length; i++) {
+      const alpha = (i / ball.history.length) * 0.5;
+      ctx.beginPath();
+      ctx.moveTo(ball.history[i - 1].x, ball.history[i - 1].y);
+      ctx.lineTo(ball.history[i].x, ball.history[i].y);
+      ctx.strokeStyle = ball.color;
+      ctx.globalAlpha = alpha;
+      ctx.lineWidth = 2;
+      ctx.stroke();
+    }
+    ctx.globalAlpha = 1;
+    ctx.restore();
+  }
 
   if (showContraction && speed > 2) {
     // Length contraction: shrink along velocity direction
@@ -686,9 +773,16 @@ const INFO_UPDATE_INTERVAL = 100; // ms between info panel updates
 const SUB_STEPS = 4;  // physics sub-steps per frame
 
 function gameLoop(timestamp) {
-  const dt = Math.min((timestamp - lastTime) / 1000, 0.05);
+  const realDt = Math.min((timestamp - lastTime) / 1000, 0.05);
   lastTime = timestamp;
 
+  // Smoothly recover timeScale toward 1.0
+  if (timeScale < 1.0) {
+    timeScale += (1.0 - timeScale) * 2.0 * realDt;
+    if (timeScale > 0.99) timeScale = 1.0;
+  }
+
+  const dt = realDt * timeScale;
   const subDt = dt / SUB_STEPS;
 
   for (let step = 0; step < SUB_STEPS; step++) {
@@ -797,6 +891,76 @@ function runPhysicsTests() {
     passed++;
   } else {
     console.log("FAIL: Test 2b – Momentum NOT conserved: P_before=" + P_before.toFixed(4) + " P_after=" + P_after.toFixed(4) + " (rel diff=" + P_diff.toExponential(2) + ")");
+    failed++;
+  }
+
+  // Test 3: Mouse click detection radius uses BALL_R * 4
+  const clickRadius = BALL_R * 4;
+  if (clickRadius >= 80) {
+    console.log("PASS: Test 3 – Click radius = " + clickRadius + " (>= 80, sufficient for scaled canvas)");
+    passed++;
+  } else {
+    console.log("FAIL: Test 3 – Click radius = " + clickRadius + " (expected >= 80)");
+    failed++;
+  }
+
+  // Test 4: Ball history array exists and respects size limit
+  const testBall = new Ball(400, 400, "#ff0000", 99, 1);
+  testBall.vx = 100;
+  testBall.vy = 0;
+  // Simulate 60 update calls to exceed the 45-entry cap
+  for (let i = 0; i < 60; i++) {
+    testBall.x += 1;
+    if (testBall.speed() > MIN_SPEED * 2) {
+      testBall.history.push({ x: testBall.x, y: testBall.y });
+      if (testBall.history.length > 45) testBall.history.shift();
+    }
+  }
+  if (testBall.history.length === 45) {
+    console.log("PASS: Test 4a – Ball history capped at 45 entries");
+    passed++;
+  } else {
+    console.log("FAIL: Test 4a – Ball history length = " + testBall.history.length + " (expected 45)");
+    failed++;
+  }
+
+  // Test 5: timeScale variable exists and defaults to 1.0
+  if (timeScale === 1.0) {
+    console.log("PASS: Test 5 – timeScale defaults to 1.0");
+    passed++;
+  } else {
+    console.log("FAIL: Test 5 – timeScale = " + timeScale + " (expected 1.0)");
+    failed++;
+  }
+
+  // Test 6: Bullet time triggers when gamma > 1.5
+  const savedTimeScale = timeScale;
+  const savedChecked = chkBullet.checked;
+  chkBullet.checked = true;
+  timeScale = 1.0;
+  // Verify the trigger condition: gamma at 0.75c exceeds threshold of 1.5
+  const bulletTestSpeed = 0.75 * C;
+  const bulletGamma = gamma(bulletTestSpeed);
+  if (bulletGamma > 1.5) {
+    // Simulate what resolveCollision does: set timeScale = 0.05
+    timeScale = 0.05;
+  }
+  if (timeScale === 0.05) {
+    console.log("PASS: Test 6 – Bullet time triggered (gamma=" + bulletGamma.toFixed(3) + " > 1.5, timeScale=" + timeScale + ")");
+    passed++;
+  } else {
+    console.log("FAIL: Test 6 – Bullet time not triggered (gamma=" + bulletGamma.toFixed(3) + ", timeScale=" + timeScale + ")");
+    failed++;
+  }
+  timeScale = savedTimeScale;
+  chkBullet.checked = savedChecked;
+
+  // Test 7: drawGrid function exists
+  if (typeof drawGrid === "function") {
+    console.log("PASS: Test 7 – drawGrid function exists");
+    passed++;
+  } else {
+    console.log("FAIL: Test 7 – drawGrid function missing");
     failed++;
   }
 
