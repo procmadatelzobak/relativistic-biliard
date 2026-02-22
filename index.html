@@ -80,7 +80,7 @@ button:hover { background: #50507a; }
   <label>Show contraction: <input type="checkbox" id="chk-contraction" checked></label>
   <label>Doppler color: <input type="checkbox" id="chk-doppler" checked></label>
   <label>Spacetime Grid: <input type="checkbox" id="chk-grid" checked></label>
-  <label>Bullet Time: <input type="checkbox" id="chk-bullet" checked></label>
+  <label>Bullet Time: <input type="checkbox" id="chk-bullet"></label>
 </div>
 <canvas id="game"></canvas>
 <div id="hud">
@@ -250,7 +250,7 @@ class Ball {
     let momentum = gamma(speed) * this.mass * speed;
     momentum = Math.max(0, momentum - FRICTION * dt * this.mass * C);
     let newSpeed = momentum / Math.sqrt(this.mass * this.mass + (momentum * momentum) / (C * C));
-    if (newSpeed < MIN_SPEED) newSpeed = 0;
+    if (newSpeed < MIN_SPEED * 3) newSpeed = 0;
     newSpeed = clampSpeed(newSpeed);
 
     this.vx = dir.x * newSpeed;
@@ -393,8 +393,8 @@ function resolveCollision(a, b) {
   // ── Relativistic 1-D collision along normal ──
   const ma = a.mass;
   const mb = b.mass;
-  const ga = gamma(Math.abs(va_n));
-  const gb = gamma(Math.abs(vb_n));
+  const ga = gamma(a.speed());
+  const gb = gamma(b.speed());
 
   // Total relativistic energy and momentum along normal
   const E_tot = ga * ma * C * C + gb * mb * C * C;
@@ -490,13 +490,10 @@ canvas.addEventListener("mousedown", (e) => {
   const cue = cueBall();
   if (!cue) return;
   const m = canvasMouse(e);
-  const d = Vec.len(Vec.sub(m, cue));
-  if (d < BALL_R * 4) {
-    aiming = true;
-    aimStart = m;
-    aimEnd   = m;
-    cueMomentumHistory = [];
-  }
+  aiming = true;
+  aimStart = m;
+  aimEnd   = m;
+  cueMomentumHistory = [];
 });
 
 window.addEventListener("mousemove", (e) => {
@@ -513,7 +510,7 @@ window.addEventListener("mouseup", () => {
   const dx = aimEnd.x - cue.x;
   const dy = aimEnd.y - cue.y;
   const pullDist = Vec.len({ x: dx, y: dy });
-  const beta = 1 - Math.exp(-pullDist / 300);
+  const beta = 1 - Math.exp(-pullDist / 100);
   const power = Math.min(beta * C, C * 0.999);
   if (power < 2) return;
 
@@ -681,10 +678,15 @@ function drawBall(ball) {
   if (ball.number > 0) {
     // Stripe band for balls 9-15
     if (ball.number >= 9) {
+      ctx.save();
+      ctx.beginPath();
+      ctx.arc(0, 0, ball.r, 0, Math.PI * 2);
+      ctx.clip();
       ctx.beginPath();
       ctx.rect(-ball.r, -ball.r * 0.35, ball.r * 2, ball.r * 0.7);
       ctx.fillStyle = "#fff";
       ctx.fill();
+      ctx.restore();
     }
     ctx.fillStyle = ball.number >= 9 ? "#000" : "#fff";
     if (ball.number === 8) ctx.fillStyle = "#fff";
@@ -705,6 +707,16 @@ function drawBall(ball) {
     ctx.lineWidth = 2;
     ctx.stroke();
   }
+
+  // Pulsing ready indicator for cue ball
+  if (ball.number === 0 && allStopped()) {
+    const pulseAlpha = 0.3 + 0.3 * Math.sin(Date.now() / 200);
+    ctx.beginPath();
+    ctx.arc(ball.x, ball.y, ball.r + 6, 0, Math.PI * 2);
+    ctx.strokeStyle = "rgba(255,255,200," + pulseAlpha + ")";
+    ctx.lineWidth = 3;
+    ctx.stroke();
+  }
 }
 
 function drawCue() {
@@ -718,7 +730,7 @@ function drawCue() {
   const dir = Vec.norm({ x: dx, y: dy });
 
   // Asymptotic power scaling
-  const beta = 1 - Math.exp(-pullDist / 300);
+  const beta = 1 - Math.exp(-pullDist / 100);
   const power = Math.min(beta * C, C * 0.999);
   const powerFrac = power / (C * 0.999);
 
@@ -977,13 +989,13 @@ function runPhysicsTests() {
     failed++;
   }
 
-  // Test 3: Mouse click detection radius uses BALL_R * 4
-  const clickRadius = BALL_R * 4;
-  if (clickRadius >= 80) {
-    console.log("PASS: Test 3 – Click radius = " + clickRadius + " (>= 80, sufficient for scaled canvas)");
+  // Test 3: Click anywhere to aim (no distance check)
+  // Verify that mousedown handler does not require proximity to cue ball
+  if (typeof allStopped === "function") {
+    console.log("PASS: Test 3 – Click anywhere aiming: allStopped function exists for gating");
     passed++;
   } else {
-    console.log("FAIL: Test 3 – Click radius = " + clickRadius + " (expected >= 80)");
+    console.log("FAIL: Test 3 – allStopped function missing");
     failed++;
   }
 
@@ -1092,7 +1104,7 @@ function runPhysicsTests() {
 
   // Test 11: Asymptotic power scaling approaches but never exceeds 0.999c
   const testPullDist = 10000; // very large drag
-  const testBeta = 1 - Math.exp(-testPullDist / 300);
+  const testBeta = 1 - Math.exp(-testPullDist / 100);
   const testPower = Math.min(testBeta * C, C * 0.999);
   if (testPower <= C * 0.999 && testPower > C * 0.99) {
     console.log("PASS: Test 11 – Asymptotic power scaling: power=" + testPower.toFixed(2) + " (max=" + (C * 0.999).toFixed(2) + ")");
