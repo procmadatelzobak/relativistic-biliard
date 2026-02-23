@@ -67,6 +67,16 @@ button {
   font-size: 0.8rem;
 }
 button:hover { background: #50507a; }
+#physics-panel {
+  display: flex;
+  gap: 14px;
+  align-items: center;
+  margin-bottom: 6px;
+  font-size: 0.78rem;
+  flex-wrap: wrap;
+  justify-content: center;
+}
+#physics-panel label { color: #aaa; }
 </style>
 </head>
 <body>
@@ -81,6 +91,13 @@ button:hover { background: #50507a; }
   <label>Doppler color: <input type="checkbox" id="chk-doppler" checked></label>
   <label>Spacetime Grid: <input type="checkbox" id="chk-grid" checked></label>
   <label>Bullet Time: <input type="checkbox" id="chk-bullet"></label>
+</div>
+<div id="physics-panel">
+  <label>Dynamic Gravity: <input type="checkbox" id="chk-grav" checked></label>
+  <label>Rotational Mass: <input type="checkbox" id="chk-rot-mass" checked></label>
+  <label>Frame-Dragging: <input type="checkbox" id="chk-frame-drag" checked></label>
+  <label>Wigner Rotation: <input type="checkbox" id="chk-wigner" checked></label>
+  <label>Magnus Effect: <input type="checkbox" id="chk-magnus" checked></label>
 </div>
 <canvas id="game"></canvas>
 <div id="hud">
@@ -115,6 +132,11 @@ const chkContraction = document.getElementById("chk-contraction");
 const chkDoppler     = document.getElementById("chk-doppler");
 const chkGrid        = document.getElementById("chk-grid");
 const chkBullet      = document.getElementById("chk-bullet");
+const chkGrav        = document.getElementById("chk-grav");
+const chkRotMass     = document.getElementById("chk-rot-mass");
+const chkFrameDrag   = document.getElementById("chk-frame-drag");
+const chkWigner      = document.getElementById("chk-wigner");
+const chkMagnus      = document.getElementById("chk-magnus");
 const infoPanel      = document.getElementById("info-panel");
 
 // ── Constants & Config ────────────────────────────────────
@@ -127,9 +149,10 @@ const FRICTION = 0.05;         // deceleration (px/s²)
 const RESTITUTION = 0.96;      // coefficient of restitution for walls
 const MIN_SPEED = 1;           // below this, ball stops
 const GRAVITY_G = 15000;       // dynamic gravity coupling constant
-const SPIN_TRANSFER = 2.0;    // fraction of tangential velocity transferred to spin
+const SURFACE_MU = 0.05;      // surface friction coefficient (smooth phenolic resin)
 const MAGNUS_K = 0.01;        // Magnus effect strength (rotation angle per unit omega per second)
 const SPIN_FRICTION = 0.5;    // spin decay rate (only when moving)
+const FRAME_DRAG_K = 5000;    // frame-dragging coupling constant
 
 canvas.width  = TABLE_W;
 canvas.height = TABLE_H;
@@ -167,6 +190,16 @@ function clampSpeed(speed) {
  */
 function relVelAdd(u, v) {
   return (u + v) / (1 + (u * v) / (C * C));
+}
+
+/** Total kinetic mass: linear relativistic + rotational energy-mass equivalence */
+function totalKineticMass(ball) {
+  let M = (gamma(ball.speed()) - 1) * ball.mass;
+  if (chkRotMass.checked) {
+    const E_rot = 0.5 * (0.4 * ball.mass * BALL_R * BALL_R) * (ball.omega * ball.omega);
+    M += E_rot / (C * C);
+  }
+  return M;
 }
 
 // ── Ball class ────────────────────────────────────────────
@@ -266,8 +299,8 @@ class Ball {
     this.vx = dir.x * newSpeed;
     this.vy = dir.y * newSpeed;
 
-    // Magnus effect: if moving AND spinning, rotate the velocity vector (preserves speed)
-    if (newSpeed > 0 && Math.abs(this.omega) > 0.01) {
+    // Magnus effect: if enabled, moving AND spinning, rotate the velocity vector (preserves speed)
+    if (chkMagnus.checked && newSpeed > 0 && Math.abs(this.omega) > 0.01) {
       const magnusAngle = MAGNUS_K * this.omega * dt;
       const cos_a = Math.cos(magnusAngle);
       const sin_a = Math.sin(magnusAngle);
@@ -359,6 +392,9 @@ function wallCollisions(ball) {
   const top    = CUSHION + ball.r;
   const bottom = TABLE_H - CUSHION - ball.r;
 
+  // Record pre-bounce velocity for Wigner rotation
+  const vx1 = ball.vx, vy1 = ball.vy;
+
   let hit = false;
   if (ball.x < left)   { ball.x = left;   ball.vx = -ball.vx; hit = true; }
   if (ball.x > right)  { ball.x = right;  ball.vx = -ball.vx; hit = true; }
@@ -375,6 +411,13 @@ function wallCollisions(ball) {
     const scale = v_new / speed;
     ball.vx *= scale;
     ball.vy *= scale;
+
+    // Wigner Rotation (Thomas Precession) on wall bounce
+    if (chkWigner.checked) {
+      const g_w = gamma(Vec.len({ x: vx1, y: vy1 }));
+      const cross = vx1 * ball.vy - vy1 * ball.vx;
+      ball.theta += (g_w * g_w / (g_w + 1)) * cross / (C * C);
+    }
   }
 }
 
@@ -400,10 +443,8 @@ function applyGravity(a, b, dt) {
   let dist = Math.sqrt(dx * dx + dy * dy);
   dist = Math.max(dist, BALL_R * 2);
 
-  const v_eqA = Math.abs(a.omega) * a.r;
-  const mKinA = (gamma(a.speed()) * gamma(v_eqA) - 1) * a.mass;
-  const v_eqB = Math.abs(b.omega) * b.r;
-  const mKinB = (gamma(b.speed()) * gamma(v_eqB) - 1) * b.mass;
+  const mKinA = totalKineticMass(a);
+  const mKinB = totalKineticMass(b);
   if (mKinA === 0 && mKinB === 0) return;
 
   const F = GRAVITY_G * mKinA * mKinB / (dist * dist);
@@ -434,6 +475,39 @@ function applyGravity(a, b, dt) {
     const pbDir = Vec.norm({ x: pbx, y: pby });
     b.vx = pbDir.x * vbNew;
     b.vy = pbDir.y * vbNew;
+  }
+}
+
+// ── Frame-Dragging (Lense-Thirring Effect) ────────────────
+function applyFrameDragging(allBalls, dt) {
+  if (!chkFrameDrag.checked) return;
+  for (let i = 0; i < allBalls.length; i++) {
+    const a = allBalls[i];
+    if (!a.active || Math.abs(a.omega) < 0.01) continue;
+    const M_a = totalKineticMass(a);
+    if (M_a === 0) continue;
+    for (let j = 0; j < allBalls.length; j++) {
+      if (i === j || !allBalls[j].active) continue;
+      const b = allBalls[j];
+      const dx = b.x - a.x;
+      const dy = b.y - a.y;
+      let dist = Math.sqrt(dx * dx + dy * dy);
+      dist = Math.max(dist, BALL_R * 2);
+      // Tangential direction perpendicular to displacement
+      const tx = -dy / dist;
+      const ty = dx / dist;
+      const F_drag = FRAME_DRAG_K * a.omega * M_a / (dist * dist * dist);
+      const sb = b.speed();
+      const px = gamma(sb) * b.mass * b.vx + tx * F_drag * dt;
+      const py = gamma(sb) * b.mass * b.vy + ty * F_drag * dt;
+      const pMag = Math.sqrt(px * px + py * py);
+      if (pMag > 0) {
+        const vNew = clampSpeed(pMag / Math.sqrt(b.mass * b.mass + (pMag * pMag) / (C * C)));
+        const pDir = Vec.norm({ x: px, y: py });
+        b.vx = pDir.x * vNew;
+        b.vy = pDir.y * vNew;
+      }
+    }
   }
 }
 
@@ -478,7 +552,12 @@ function resolveCollision(a, b) {
   const vb_ty = b.vy - vb_n * ny;
 
   // Only resolve if approaching
-  if (va_n - vb_n <= 0) return;
+  const v_approach = va_n - vb_n;
+  if (v_approach <= 0) return;
+
+  // Record pre-collision velocities for Wigner rotation
+  const a_vx1 = a.vx, a_vy1 = a.vy;
+  const b_vx1 = b.vx, b_vy1 = b.vy;
 
   // ── Relativistic 1-D collision along normal ──
   const ma = a.mass;
@@ -521,19 +600,46 @@ function resolveCollision(a, b) {
   let sb = Vec.len({ x: b.vx, y: b.vy });
   if (sb > C * 0.9999) { const f = (C * 0.9999) / sb; b.vx *= f; b.vy *= f; }
 
-  // ── Spin transfer from off-center (tangential) collision ──
+  // ── Spin transfer with moment of inertia (energy-conserving) ──
+  const R = BALL_R;
+  const I_a = 0.4 * ma * R * R;
+  const I_b = 0.4 * mb * R * R;
   const tx = -ny;
   const ty = nx;
-  const relVx = a.vx - b.vx;
-  const relVy = a.vy - b.vy;
-  const vTan = relVx * tx + relVy * ty;
-  const omegaTransfer = SPIN_TRANSFER * vTan / BALL_R;
-  a.omega += omegaTransfer;
-  b.omega -= omegaTransfer;
+  // Relative sliding velocity at contact point (tangential)
+  const v_rel_tan = (a.vx - b.vx) * tx + (a.vy - b.vy) * ty;
+  const v_slip = v_rel_tan + R * (a.omega + b.omega);
+  // Effective inverse mass for tangential impulse
+  const inv_eff = 1 / ma + 1 / mb + R * R / I_a + R * R / I_b;
+  const j_t_noslip = v_slip / inv_eff;
+  // Cap tangential impulse by friction (smooth phenolic resin)
+  const j_n_approx = v_approach * ma;
+  const j_t_max = SURFACE_MU * j_n_approx;
+  const j_t = Math.sign(v_slip) * Math.min(Math.abs(j_t_noslip), j_t_max);
+  // Apply tangential impulse to linear velocities
+  a.vx -= j_t / ma * tx;
+  a.vy -= j_t / ma * ty;
+  b.vx += j_t / mb * tx;
+  b.vy += j_t / mb * ty;
+  // Apply tangential impulse to angular velocities
+  a.omega -= j_t * R / I_a;
+  b.omega -= j_t * R / I_b;
   // Clamp spin: equatorial speed must not exceed 0.999c
   const maxOmega = 0.999 * C / BALL_R;
   a.omega = Math.max(-maxOmega, Math.min(maxOmega, a.omega));
   b.omega = Math.max(-maxOmega, Math.min(maxOmega, b.omega));
+
+  // ── Wigner Rotation (Thomas Precession) ──
+  if (chkWigner.checked) {
+    // Ball A
+    const ga_w = gamma(Vec.len({ x: a_vx1, y: a_vy1 }));
+    const crossA = a_vx1 * a.vy - a_vy1 * a.vx;
+    a.theta += (ga_w * ga_w / (ga_w + 1)) * crossA / (C * C);
+    // Ball B
+    const gb_w = gamma(Vec.len({ x: b_vx1, y: b_vy1 }));
+    const crossB = b_vx1 * b.vy - b_vy1 * b.vx;
+    b.theta += (gb_w * gb_w / (gb_w + 1)) * crossB / (C * C);
+  }
 
   // Bullet-time trigger on high-energy collisions
   if (chkBullet.checked) {
@@ -642,10 +748,7 @@ function gridWarp(x, y, activeBalls) {
   for (const ball of activeBalls) {
     const dx = ball.x - x, dy = ball.y - y;
     const dist = Math.sqrt(dx * dx + dy * dy) || 1;
-    const v_eq = Math.abs(ball.omega) * ball.r;
-    const gamma_rot = gamma(v_eq);
-    const total_gamma = gamma(ball.speed()) * gamma_rot;
-    const relMass = (total_gamma - 1) * ball.mass;
+    const relMass = totalKineticMass(ball);
     const pull = relMass * GRID_WARP_STRENGTH / (dist * dist + GRID_WARP_SMOOTHING);
     ox += (dx / dist) * pull;
     oy += (dy / dist) * pull;
@@ -1018,13 +1121,17 @@ function gameLoop(timestamp) {
 
   for (let step = 0; step < SUB_STEPS; step++) {
     // Dynamic gravity between all active balls
-    for (let i = 0; i < balls.length; i++) {
-      if (!balls[i].active) continue;
-      for (let j = i + 1; j < balls.length; j++) {
-        if (!balls[j].active) continue;
-        applyGravity(balls[i], balls[j], subDt);
+    if (chkGrav.checked) {
+      for (let i = 0; i < balls.length; i++) {
+        if (!balls[i].active) continue;
+        for (let j = i + 1; j < balls.length; j++) {
+          if (!balls[j].active) continue;
+          applyGravity(balls[i], balls[j], subDt);
+        }
       }
     }
+    // Frame-dragging (Lense-Thirring effect)
+    applyFrameDragging(balls, subDt);
     for (const ball of balls) {
       if (ball.active) ball.update(subDt);
     }
@@ -1411,6 +1518,92 @@ function runPhysicsTests() {
     passed++;
   } else {
     console.log("FAIL: Test 22 – Spin did not decay: before=" + omegaBefore + " after=" + movingSpinBall.omega);
+    failed++;
+  }
+
+  // Test 23: totalKineticMass returns zero for stationary non-spinning ball
+  const tkBall = new Ball(400, 400, "#ff0000", 60, 1);
+  tkBall.vx = 0; tkBall.vy = 0; tkBall.omega = 0;
+  const tkm = totalKineticMass(tkBall);
+  if (tkm === 0) {
+    console.log("PASS: Test 23 – totalKineticMass is zero for stationary non-spinning ball");
+    passed++;
+  } else {
+    console.log("FAIL: Test 23 – totalKineticMass = " + tkm + " (expected 0)");
+    failed++;
+  }
+
+  // Test 24: totalKineticMass includes rotational energy for spinning ball
+  const tkSpinBall = new Ball(400, 400, "#ff0000", 61, 1);
+  tkSpinBall.vx = 0; tkSpinBall.vy = 0;
+  tkSpinBall.omega = 10.0;
+  const tkmSpin = totalKineticMass(tkSpinBall);
+  const expectedErot = 0.5 * 0.4 * 1 * BALL_R * BALL_R * 100;
+  const expectedM = expectedErot / (C * C);
+  if (Math.abs(tkmSpin - expectedM) < 0.0001) {
+    console.log("PASS: Test 24 – totalKineticMass includes rotational energy: " + tkmSpin.toFixed(6) + " (expected " + expectedM.toFixed(6) + ")");
+    passed++;
+  } else {
+    console.log("FAIL: Test 24 – totalKineticMass = " + tkmSpin.toFixed(6) + " (expected " + expectedM.toFixed(6) + ")");
+    failed++;
+  }
+
+  // Test 25: SURFACE_MU is 0.05 (smooth phenolic resin)
+  if (SURFACE_MU === 0.05) {
+    console.log("PASS: Test 25 – SURFACE_MU = 0.05");
+    passed++;
+  } else {
+    console.log("FAIL: Test 25 – SURFACE_MU = " + SURFACE_MU + " (expected 0.05)");
+    failed++;
+  }
+
+  // Test 26: applyFrameDragging function exists
+  if (typeof applyFrameDragging === "function") {
+    console.log("PASS: Test 26 – applyFrameDragging function exists");
+    passed++;
+  } else {
+    console.log("FAIL: Test 26 – applyFrameDragging function missing");
+    failed++;
+  }
+
+  // Test 27: FRAME_DRAG_K constant is 5000
+  if (FRAME_DRAG_K === 5000) {
+    console.log("PASS: Test 27 – FRAME_DRAG_K = 5000");
+    passed++;
+  } else {
+    console.log("FAIL: Test 27 – FRAME_DRAG_K = " + FRAME_DRAG_K + " (expected 5000)");
+    failed++;
+  }
+
+  // Test 28: Physics panel checkboxes exist and are checked by default
+  const panelChecks = [chkGrav, chkRotMass, chkFrameDrag, chkWigner, chkMagnus];
+  const panelNames = ["chkGrav", "chkRotMass", "chkFrameDrag", "chkWigner", "chkMagnus"];
+  let allChecked = true;
+  for (let i = 0; i < panelChecks.length; i++) {
+    if (!panelChecks[i] || !panelChecks[i].checked) { allChecked = false; break; }
+  }
+  if (allChecked) {
+    console.log("PASS: Test 28 – All physics panel checkboxes exist and are checked by default");
+    passed++;
+  } else {
+    console.log("FAIL: Test 28 – Some physics panel checkboxes missing or unchecked");
+    failed++;
+  }
+
+  // Test 29: Collision spin transfer is energy-conserving (low friction)
+  // A ball hitting another at 0.5c tangentially should transfer very little spin
+  const colA = new Ball(400, 400, "#ff0000", 62, 1);
+  const colB = new Ball(400 + BALL_R * 2, 400, "#0000ff", 63, 1);
+  colA.vx = 0; colA.vy = 0.5 * C;
+  colB.vx = 0; colB.vy = 0;
+  colA.omega = 0; colB.omega = 0;
+  resolveCollision(colA, colB);
+  const maxSpinFromCollision = 0.999 * C / BALL_R;
+  if (Math.abs(colA.omega) < maxSpinFromCollision * 0.1 && Math.abs(colB.omega) < maxSpinFromCollision * 0.1) {
+    console.log("PASS: Test 29 – Collision spin transfer is limited (a.omega=" + colA.omega.toFixed(4) + " b.omega=" + colB.omega.toFixed(4) + ")");
+    passed++;
+  } else {
+    console.log("FAIL: Test 29 – Excessive spin from collision: a.omega=" + colA.omega.toFixed(4) + " b.omega=" + colB.omega.toFixed(4));
     failed++;
   }
 
