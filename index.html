@@ -267,7 +267,7 @@ class Ball {
     this.vy = dir.y * newSpeed;
 
     // Magnus effect: if moving AND spinning, apply perpendicular force
-    if (newSpeed > 0 && this.omega !== 0) {
+    if (newSpeed > 0 && Math.abs(this.omega) > 0.01) {
       const perpX = -dir.y;
       const perpY = dir.x;
       const magnusForce = MAGNUS_K * this.omega * newSpeed;
@@ -1359,6 +1359,23 @@ function runPhysicsTests() {
     failed++;
   }
 
+  // Test 19b: applyGravity attracts relativistic balls toward each other
+  const gBallC = new Ball(200, 400, "#ff0000", 56, 1);
+  const gBallD = new Ball(600, 400, "#0000ff", 57, 1);
+  gBallC.vx = 0; gBallC.vy = 0.8 * C;
+  gBallD.vx = 0; gBallD.vy = -0.8 * C;
+  const cVxBefore = gBallC.vx;
+  const dVxBefore = gBallD.vx;
+  applyGravity(gBallC, gBallD, 0.016);
+  // Ball C should be pulled toward D (positive x direction), Ball D pulled toward C (negative x direction)
+  if (gBallC.vx > cVxBefore && gBallD.vx < dVxBefore) {
+    console.log("PASS: Test 19b – applyGravity: relativistic balls attract (C.vx=" + gBallC.vx.toFixed(4) + " D.vx=" + gBallD.vx.toFixed(4) + ")");
+    passed++;
+  } else {
+    console.log("FAIL: Test 19b – applyGravity: C.vx=" + gBallC.vx.toFixed(4) + " D.vx=" + gBallD.vx.toFixed(4));
+    failed++;
+  }
+
   // Test 20: spinPerimeterColor returns nearly transparent for low spin
   const lowSpinColor = spinPerimeterColor(0.1, BALL_R);
   if (lowSpinColor.indexOf("rgba(255,255,255,") === 0) {
@@ -1380,6 +1397,21 @@ function runPhysicsTests() {
     passed++;
   } else {
     console.log("FAIL: Test 21 – Spin decayed on stationary ball: omega=" + stillSpinBall.omega);
+    failed++;
+  }
+
+  // Test 22: Spin decays when ball is moving
+  const movingSpinBall = new Ball(400, 400, "#ff0000", 57, 1);
+  movingSpinBall.omega = 5.0;
+  movingSpinBall.vx = 100;
+  movingSpinBall.vy = 0;
+  const omegaBefore = movingSpinBall.omega;
+  movingSpinBall.update(0.1);
+  if (movingSpinBall.omega < omegaBefore) {
+    console.log("PASS: Test 22 – Spin decays when moving (before=" + omegaBefore + " after=" + movingSpinBall.omega.toFixed(4) + ")");
+    passed++;
+  } else {
+    console.log("FAIL: Test 22 – Spin did not decay: before=" + omegaBefore + " after=" + movingSpinBall.omega);
     failed++;
   }
 
