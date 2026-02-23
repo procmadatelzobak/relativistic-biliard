@@ -127,8 +127,8 @@ const FRICTION = 0.05;         // deceleration (px/s²)
 const RESTITUTION = 0.96;      // coefficient of restitution for walls
 const MIN_SPEED = 1;           // below this, ball stops
 const GRAVITY_G = 15000;       // dynamic gravity coupling constant
-const SPIN_TRANSFER = 0.3;    // fraction of tangential velocity transferred to spin
-const MAGNUS_K = 0.0002;      // Magnus effect strength
+const SPIN_TRANSFER = 2.0;    // fraction of tangential velocity transferred to spin
+const MAGNUS_K = 0.01;        // Magnus effect strength (rotation angle per unit omega per second)
 const SPIN_FRICTION = 0.5;    // spin decay rate (only when moving)
 
 canvas.width  = TABLE_W;
@@ -266,21 +266,15 @@ class Ball {
     this.vx = dir.x * newSpeed;
     this.vy = dir.y * newSpeed;
 
-    // Magnus effect: if moving AND spinning, apply perpendicular force
+    // Magnus effect: if moving AND spinning, rotate the velocity vector (preserves speed)
     if (newSpeed > 0 && Math.abs(this.omega) > 0.01) {
-      const perpX = -dir.y;
-      const perpY = dir.x;
-      const magnusForce = MAGNUS_K * this.omega * newSpeed;
-      let px = gamma(newSpeed) * this.mass * this.vx + perpX * magnusForce * dt;
-      let py = gamma(newSpeed) * this.mass * this.vy + perpY * magnusForce * dt;
-      const pMag = Math.sqrt(px * px + py * py);
-      if (pMag > 0) {
-        const vFromP = pMag / Math.sqrt(this.mass * this.mass + (pMag * pMag) / (C * C));
-        const vClamped = clampSpeed(vFromP);
-        const pDir = Vec.norm({ x: px, y: py });
-        this.vx = pDir.x * vClamped;
-        this.vy = pDir.y * vClamped;
-      }
+      const magnusAngle = MAGNUS_K * this.omega * dt;
+      const cos_a = Math.cos(magnusAngle);
+      const sin_a = Math.sin(magnusAngle);
+      const newVx = this.vx * cos_a - this.vy * sin_a;
+      const newVy = this.vx * sin_a + this.vy * cos_a;
+      this.vx = newVx;
+      this.vy = newVy;
     }
 
     // Spin friction: only decays when ball is moving linearly
@@ -406,8 +400,10 @@ function applyGravity(a, b, dt) {
   let dist = Math.sqrt(dx * dx + dy * dy);
   dist = Math.max(dist, BALL_R * 2);
 
-  const mKinA = (gamma(a.speed()) - 1) * a.mass;
-  const mKinB = (gamma(b.speed()) - 1) * b.mass;
+  const v_eqA = Math.abs(a.omega) * a.r;
+  const mKinA = (gamma(a.speed()) * gamma(v_eqA) - 1) * a.mass;
+  const v_eqB = Math.abs(b.omega) * b.r;
+  const mKinB = (gamma(b.speed()) * gamma(v_eqB) - 1) * b.mass;
   if (mKinA === 0 && mKinB === 0) return;
 
   const F = GRAVITY_G * mKinA * mKinB / (dist * dist);
@@ -646,7 +642,10 @@ function gridWarp(x, y, activeBalls) {
   for (const ball of activeBalls) {
     const dx = ball.x - x, dy = ball.y - y;
     const dist = Math.sqrt(dx * dx + dy * dy) || 1;
-    const relMass = (gamma(ball.speed()) - 1) * ball.mass;
+    const v_eq = Math.abs(ball.omega) * ball.r;
+    const gamma_rot = gamma(v_eq);
+    const total_gamma = gamma(ball.speed()) * gamma_rot;
+    const relMass = (total_gamma - 1) * ball.mass;
     const pull = relMass * GRID_WARP_STRENGTH / (dist * dist + GRID_WARP_SMOOTHING);
     ox += (dx / dist) * pull;
     oy += (dy / dist) * pull;
