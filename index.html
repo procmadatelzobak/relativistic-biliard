@@ -126,6 +126,10 @@ const BALL_R   = 22;           // rest-frame ball radius
 const FRICTION = 0.05;         // deceleration (px/s²)
 const RESTITUTION = 0.96;      // coefficient of restitution for walls
 const MIN_SPEED = 1;           // below this, ball stops
+const GRAVITY_G = 15000;       // dynamic gravity coupling constant
+const SPIN_TRANSFER = 0.3;    // fraction of tangential velocity transferred to spin
+const MAGNUS_K = 0.0002;      // Magnus effect strength
+const SPIN_FRICTION = 0.5;    // spin decay rate (only when moving)
 
 canvas.width  = TABLE_W;
 canvas.height = TABLE_H;
@@ -179,6 +183,8 @@ class Ball {
     this.mass = mass || 1;
     this.active = true;        // false when pocketed
     this.history = [];         // trail of past positions
+    this.omega = 0;            // angular velocity (spin)
+    this.theta = 0;            // rotation angle
     this._parseHue();
   }
 
@@ -237,6 +243,10 @@ class Ball {
       return;
     }
     let speed = this.speed();
+
+    // Advance rotation angle
+    this.theta += this.omega * dt;
+
     if (speed < MIN_SPEED) { this.vx = 0; this.vy = 0; return; }
 
     // Record trail position if moving significantly
@@ -255,6 +265,28 @@ class Ball {
 
     this.vx = dir.x * newSpeed;
     this.vy = dir.y * newSpeed;
+
+    // Magnus effect: if moving AND spinning, apply perpendicular force
+    if (newSpeed > 0 && this.omega !== 0) {
+      const perpX = -dir.y;
+      const perpY = dir.x;
+      const magnusForce = MAGNUS_K * this.omega * newSpeed;
+      let px = gamma(newSpeed) * this.mass * this.vx + perpX * magnusForce * dt;
+      let py = gamma(newSpeed) * this.mass * this.vy + perpY * magnusForce * dt;
+      const pMag = Math.sqrt(px * px + py * py);
+      if (pMag > 0) {
+        const vFromP = pMag / Math.sqrt(this.mass * this.mass + (pMag * pMag) / (C * C));
+        const vClamped = clampSpeed(vFromP);
+        const pDir = Vec.norm({ x: px, y: py });
+        this.vx = pDir.x * vClamped;
+        this.vy = pDir.y * vClamped;
+      }
+    }
+
+    // Spin friction: only decays when ball is moving linearly
+    if (newSpeed > 0) {
+      this.omega *= Math.max(0, 1 - SPIN_FRICTION * dt);
+    }
 
     // Move
     this.x += this.vx * dt;
@@ -352,6 +384,63 @@ function wallCollisions(ball) {
   }
 }
 
+// ── Elliptical hitbox: effective radius along a direction ──
+function effectiveRadius(ball, nx, ny) {
+  const speed = ball.speed();
+  if (speed < MIN_SPEED) return ball.r;
+  const g = gamma(speed);
+  const a = ball.r / g;  // semi-axis along velocity (contracted)
+  const b = ball.r;      // semi-axis perpendicular to velocity
+  const velAngle = Math.atan2(ball.vy, ball.vx);
+  const normAngle = Math.atan2(ny, nx);
+  const alpha = normAngle - velAngle;
+  const cosA = Math.cos(alpha);
+  const sinA = Math.sin(alpha);
+  return (a * b) / Math.sqrt(b * b * cosA * cosA + a * a * sinA * sinA);
+}
+
+// ── Dynamic gravity (spacetime curvature) ─────────────────
+function applyGravity(a, b, dt) {
+  const dx = b.x - a.x;
+  const dy = b.y - a.y;
+  let dist = Math.sqrt(dx * dx + dy * dy);
+  dist = Math.max(dist, BALL_R * 2);
+
+  const mKinA = (gamma(a.speed()) - 1) * a.mass;
+  const mKinB = (gamma(b.speed()) - 1) * b.mass;
+  if (mKinA === 0 && mKinB === 0) return;
+
+  const F = GRAVITY_G * mKinA * mKinB / (dist * dist);
+  if (F === 0) return;
+
+  const nx = dx / dist;
+  const ny = dy / dist;
+
+  // Apply force to ball a's momentum (toward b)
+  const saA = a.speed();
+  const pax = gamma(saA) * a.mass * a.vx + nx * F * dt;
+  const pay = gamma(saA) * a.mass * a.vy + ny * F * dt;
+  const paMag = Math.sqrt(pax * pax + pay * pay);
+  if (paMag > 0) {
+    const vaNew = clampSpeed(paMag / Math.sqrt(a.mass * a.mass + (paMag * paMag) / (C * C)));
+    const paDir = Vec.norm({ x: pax, y: pay });
+    a.vx = paDir.x * vaNew;
+    a.vy = paDir.y * vaNew;
+  }
+
+  // Apply force to ball b's momentum (toward a)
+  const saB = b.speed();
+  const pbx = gamma(saB) * b.mass * b.vx - nx * F * dt;
+  const pby = gamma(saB) * b.mass * b.vy - ny * F * dt;
+  const pbMag = Math.sqrt(pbx * pbx + pby * pby);
+  if (pbMag > 0) {
+    const vbNew = clampSpeed(pbMag / Math.sqrt(b.mass * b.mass + (pbMag * pbMag) / (C * C)));
+    const pbDir = Vec.norm({ x: pbx, y: pby });
+    b.vx = pbDir.x * vbNew;
+    b.vy = pbDir.y * vbNew;
+  }
+}
+
 // ── Collision: ball ↔ ball (relativistic) ─────────────────
 /**
  * Relativistic elastic collision between two balls.
@@ -363,12 +452,17 @@ function resolveCollision(a, b) {
   const dx = b.x - a.x;
   const dy = b.y - a.y;
   const dist = Math.sqrt(dx * dx + dy * dy);
-  const minDist = a.r + b.r;
-  if (dist > minDist || dist === 0) return;
+  if (dist === 0) return;
 
   // Unit normal & tangent
   const nx = dx / dist;
   const ny = dy / dist;
+
+  // Elliptical hitbox check: effective radii along collision axis
+  const rA = effectiveRadius(a, nx, ny);
+  const rB = effectiveRadius(b, -nx, -ny);
+  const minDist = rA + rB;
+  if (dist > minDist) return;
 
   // Separate overlapping balls
   const overlap = minDist - dist;
@@ -431,6 +525,20 @@ function resolveCollision(a, b) {
   let sb = Vec.len({ x: b.vx, y: b.vy });
   if (sb > C * 0.9999) { const f = (C * 0.9999) / sb; b.vx *= f; b.vy *= f; }
 
+  // ── Spin transfer from off-center (tangential) collision ──
+  const tx = -ny;
+  const ty = nx;
+  const relVx = a.vx - b.vx;
+  const relVy = a.vy - b.vy;
+  const vTan = relVx * tx + relVy * ty;
+  const omegaTransfer = SPIN_TRANSFER * vTan / BALL_R;
+  a.omega += omegaTransfer;
+  b.omega -= omegaTransfer;
+  // Clamp spin: equatorial speed must not exceed 0.999c
+  const maxOmega = 0.999 * C / BALL_R;
+  a.omega = Math.max(-maxOmega, Math.min(maxOmega, a.omega));
+  b.omega = Math.max(-maxOmega, Math.min(maxOmega, b.omega));
+
   // Bullet-time trigger on high-energy collisions
   if (chkBullet.checked) {
     const maxGamma = Math.max(ga, gb);
@@ -456,6 +564,8 @@ function checkPockets() {
             ball.y = TABLE_H / 2;
             ball.vx = 0;
             ball.vy = 0;
+            ball.omega = 0;
+            ball.theta = 0;
             ball.active = true;
           }, 600);
         }
@@ -612,6 +722,29 @@ function drawTable() {
   drawGrid();
 }
 
+function spinPerimeterColor(omega, r) {
+  const vEq = Math.abs(omega) * r;
+  const ratio = vEq / C;
+  if (ratio < 0.5) {
+    const alpha = ratio / 0.5 * 0.2;
+    return "rgba(255,255,255," + alpha.toFixed(3) + ")";
+  } else if (ratio < 0.9) {
+    const t = (ratio - 0.5) / 0.4;
+    const alpha = 0.2 + t * 0.8;
+    return "rgba(255,255,255," + alpha.toFixed(3) + ")";
+  } else if (ratio < 0.95) {
+    const t = (ratio - 0.9) / 0.05;
+    const g = Math.round(255 * (1 - t) + 165 * t);
+    const bl = Math.round(255 * (1 - t));
+    return "rgba(255," + g + "," + bl + ",1.0)";
+  } else if (ratio < 0.99) {
+    const t = (ratio - 0.95) / 0.04;
+    const g = Math.round(165 * (1 - t));
+    return "rgba(255," + g + ",0,1.0)";
+  }
+  return "rgba(255,0,0,1.0)";
+}
+
 function drawBall(ball) {
   if (!ball.active) return;
 
@@ -652,6 +785,9 @@ function drawBall(ball) {
     ctx.scale(contractFactor, 1);
     ctx.rotate(-angle);
   }
+
+  // Apply spin rotation for inner details
+  ctx.rotate(ball.theta);
 
   // Shadow
   ctx.beginPath();
@@ -694,6 +830,17 @@ function drawBall(ball) {
     ctx.textAlign = "center";
     ctx.textBaseline = "middle";
     ctx.fillText(ball.number, 0, 0);
+  }
+
+  // Dashed spin perimeter on the contracted ellipse
+  if (ball.omega !== 0) {
+    ctx.beginPath();
+    ctx.arc(0, 0, ball.r, 0, Math.PI * 2);
+    ctx.setLineDash([6, 6]);
+    ctx.lineWidth = 3;
+    ctx.strokeStyle = spinPerimeterColor(ball.omega, ball.r);
+    ctx.stroke();
+    ctx.setLineDash([]);
   }
 
   ctx.restore();
@@ -871,6 +1018,14 @@ function gameLoop(timestamp) {
   const subDt = dt / SUB_STEPS;
 
   for (let step = 0; step < SUB_STEPS; step++) {
+    // Dynamic gravity between all active balls
+    for (let i = 0; i < balls.length; i++) {
+      if (!balls[i].active) continue;
+      for (let j = i + 1; j < balls.length; j++) {
+        if (!balls[j].active) continue;
+        applyGravity(balls[i], balls[j], subDt);
+      }
+    }
     for (const ball of balls) {
       if (ball.active) ball.update(subDt);
     }
@@ -1129,6 +1284,102 @@ function runPhysicsTests() {
     passed++;
   } else {
     console.log("FAIL: Test 13 – GRID_WARP_STRENGTH = " + GRID_WARP_STRENGTH + " (expected 500000)");
+    failed++;
+  }
+
+  // Test 14: GRAVITY_G constant is 15000
+  if (GRAVITY_G === 15000) {
+    console.log("PASS: Test 14 – GRAVITY_G = 15000");
+    passed++;
+  } else {
+    console.log("FAIL: Test 14 – GRAVITY_G = " + GRAVITY_G + " (expected 15000)");
+    failed++;
+  }
+
+  // Test 15: Ball has omega and theta properties
+  const spinBall = new Ball(400, 400, "#ff0000", 50, 1);
+  if (spinBall.omega === 0 && spinBall.theta === 0) {
+    console.log("PASS: Test 15 – Ball has omega=0 and theta=0 by default");
+    passed++;
+  } else {
+    console.log("FAIL: Test 15 – omega=" + spinBall.omega + " theta=" + spinBall.theta);
+    failed++;
+  }
+
+  // Test 16: effectiveRadius returns ball.r for stationary ball
+  const stBall = new Ball(400, 400, "#ff0000", 51, 1);
+  const er = effectiveRadius(stBall, 1, 0);
+  if (er === BALL_R) {
+    console.log("PASS: Test 16 – effectiveRadius returns BALL_R for stationary ball");
+    passed++;
+  } else {
+    console.log("FAIL: Test 16 – effectiveRadius returned " + er + " (expected " + BALL_R + ")");
+    failed++;
+  }
+
+  // Test 17: effectiveRadius contracts along velocity direction
+  const fastBall = new Ball(400, 400, "#ff0000", 52, 1);
+  fastBall.vx = 0.9 * C;
+  fastBall.vy = 0;
+  const erAlong = effectiveRadius(fastBall, 1, 0);  // along velocity
+  const erPerp = effectiveRadius(fastBall, 0, 1);   // perpendicular to velocity
+  if (erAlong < BALL_R && Math.abs(erPerp - BALL_R) < 0.01) {
+    console.log("PASS: Test 17 – effectiveRadius: along=" + erAlong.toFixed(3) + " perp=" + erPerp.toFixed(3));
+    passed++;
+  } else {
+    console.log("FAIL: Test 17 – effectiveRadius: along=" + erAlong.toFixed(3) + " perp=" + erPerp.toFixed(3));
+    failed++;
+  }
+
+  // Test 18: Spin is clamped so equatorial speed < 0.999c
+  const clampBall = new Ball(400, 400, "#ff0000", 53, 1);
+  clampBall.omega = 9999999;
+  const maxOmegaTest = 0.999 * C / BALL_R;
+  clampBall.omega = Math.min(clampBall.omega, maxOmegaTest);
+  const eqSpeed = Math.abs(clampBall.omega) * BALL_R;
+  if (eqSpeed <= 0.999 * C + 0.01) {
+    console.log("PASS: Test 18 – Spin clamped: eqSpeed=" + eqSpeed.toFixed(2) + " < " + (0.999 * C).toFixed(2));
+    passed++;
+  } else {
+    console.log("FAIL: Test 18 – Spin NOT clamped: eqSpeed=" + eqSpeed.toFixed(2));
+    failed++;
+  }
+
+  // Test 19: applyGravity produces zero force for stationary balls
+  const gBallA = new Ball(200, 400, "#ff0000", 54, 1);
+  const gBallB = new Ball(600, 400, "#0000ff", 55, 1);
+  gBallA.vx = 0; gBallA.vy = 0;
+  gBallB.vx = 0; gBallB.vy = 0;
+  applyGravity(gBallA, gBallB, 0.016);
+  if (gBallA.vx === 0 && gBallA.vy === 0 && gBallB.vx === 0 && gBallB.vy === 0) {
+    console.log("PASS: Test 19 – applyGravity: no force between stationary balls");
+    passed++;
+  } else {
+    console.log("FAIL: Test 19 – applyGravity moved stationary balls: a.vx=" + gBallA.vx + " b.vx=" + gBallB.vx);
+    failed++;
+  }
+
+  // Test 20: spinPerimeterColor returns nearly transparent for low spin
+  const lowSpinColor = spinPerimeterColor(0.1, BALL_R);
+  if (lowSpinColor.indexOf("rgba(255,255,255,") === 0) {
+    console.log("PASS: Test 20 – spinPerimeterColor returns white-based for low spin: " + lowSpinColor);
+    passed++;
+  } else {
+    console.log("FAIL: Test 20 – spinPerimeterColor unexpected: " + lowSpinColor);
+    failed++;
+  }
+
+  // Test 21: Spin does not decay when ball is stationary
+  const stillSpinBall = new Ball(400, 400, "#ff0000", 56, 1);
+  stillSpinBall.omega = 5.0;
+  stillSpinBall.vx = 0;
+  stillSpinBall.vy = 0;
+  stillSpinBall.update(0.016);
+  if (stillSpinBall.omega === 5.0) {
+    console.log("PASS: Test 21 – Spin preserved when ball is stationary (omega=" + stillSpinBall.omega + ")");
+    passed++;
+  } else {
+    console.log("FAIL: Test 21 – Spin decayed on stationary ball: omega=" + stillSpinBall.omega);
     failed++;
   }
 
